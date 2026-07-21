@@ -41,6 +41,7 @@ __all__ = [
     "windows_detach_flags",
     "windows_detach_flags_without_breakaway",
     "windows_hide_flags",
+    "windows_hidden_popen_kwargs",
     "windows_detach_popen_kwargs",
     "bounded_git_probe",
     "noninteractive_git_env",
@@ -264,6 +265,21 @@ def suppress_platform_ver_console() -> None:
     except Exception:
         # Purely cosmetic hardening — never let it break startup.
         pass
+
+def windows_hidden_popen_kwargs() -> dict:
+    """Return kwargs that hide direct and nested Windows console windows."""
+    if not IS_WINDOWS:
+        return {}
+    import subprocess
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": windows_hide_flags(),
+        "startupinfo": startupinfo,
+    }
+
 
 
 def windows_detach_popen_kwargs() -> dict:

@@ -680,6 +680,32 @@ class TestEnvironmentHints:
 
 
 
+    def test_windows_environment_hints_do_not_call_platform_release(self, monkeypatch):
+        import agent.prompt_builder as _pb
+        import sys, platform
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(platform, "release", lambda: (_ for _ in ()).throw(AssertionError("must not spawn cmd /c ver")))
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        result = _pb.build_environment_hints()
+        assert "Host: Windows" in result
+
+    def test_build_environment_hints_on_windows_local(self, monkeypatch):
+        import agent.prompt_builder as _pb
+        import sys
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        _pb._clear_backend_probe_cache()
+        result = _pb.build_environment_hints()
+        assert "Host: Windows" in result
+        assert "User home directory:" in result
+        # Two Windows-specific callouts that must ALWAYS appear together:
+        # hostname warning + bash-not-PowerShell warning.
+        assert "hostname" in result
+        assert "NOT the username" in result
+        assert "bash" in result
+        assert "PowerShell" in result
 
 
     def test_build_environment_hints_suppresses_host_on_docker_backend(self, monkeypatch):

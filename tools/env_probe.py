@@ -37,7 +37,7 @@ import tempfile
 import threading
 from typing import Optional
 
-from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli._subprocess_compat import windows_hidden_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -107,11 +107,7 @@ def _run(cmd: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
                     timeout=timeout,
                     check=False,
                     stdin=subprocess.DEVNULL,
-                    # CREATE_NO_WINDOW (0 on POSIX): the probe runs in
-                    # windowless processes (pythonw gateway / kanban workers)
-                    # where a console child would otherwise flash a visible
-                    # window per probe — ~5 flashes at every worker startup.
-                    creationflags=windows_hide_flags(),
+                    **windows_hidden_popen_kwargs(),
                 )
             except subprocess.TimeoutExpired:
                 return -1, "", "timeout"
