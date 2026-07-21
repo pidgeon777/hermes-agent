@@ -1,5 +1,6 @@
 """Tests for the Hermes plugin system (hermes_cli.plugins)."""
 
+import json
 import logging
 import sys
 import types
@@ -23,6 +24,7 @@ from hermes_cli.plugins import (
     resolve_plugin_command_result,
 )
 from hermes_cli.middleware import (
+    CriticalMiddlewareError,
     VALID_MIDDLEWARE,
     apply_llm_request_middleware,
     apply_tool_request_middleware,
@@ -148,6 +150,185 @@ class TestPluginDiscovery:
 
 
 
+
+
+    def test_execution_middleware_pre_next_call_error_fails_open_to_remaining_chain(self, monkeypatch):
+        calls = []
+
+        def failing_middleware(**kwargs):
+            calls.append("failing")
+            raise RuntimeError("middleware setup failed")
+
+        def downstream_middleware(**kwargs):
+            calls.append("downstream")
+            return kwargs["next_call"]({**kwargs["args"], "rewritten": True})
+
+        manager = types.SimpleNamespace(_middleware={"tool_execution": [failing_middleware, downstream_middleware]})
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        def terminal(args):
+            calls.append(("terminal", args))
+            return args
+
+        result = run_tool_execution_middleware("terminal", {"command": "printf ok"}, terminal)
+
+        assert result == {"command": "printf ok", "rewritten": True}
+        assert calls == ["failing", "downstream", ("terminal", {"command": "printf ok", "rewritten": True})]
+
+    def test_fail_closed_request_middleware_propagates(self, monkeypatch):
+        def middleware(**kwargs):
+            raise RuntimeError("authoritative request mediation failed")
+
+        middleware._hermes_fail_closed = True
+        manager = PluginManager()
+        manager._middleware = {"llm_request": [middleware]}
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        with pytest.raises(CriticalMiddlewareError, match="authoritative request mediation failed"):
+            apply_llm_request_middleware({"messages": []})
+
+    def test_fail_closed_execution_middleware_blocks_before_downstream(self, monkeypatch):
+        calls = []
+
+        def middleware(**kwargs):
+            raise RuntimeError("authoritative setup failed")
+
+        middleware._hermes_fail_closed = True
+        manager = types.SimpleNamespace(_middleware={"tool_execution": [middleware]})
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        with pytest.raises(RuntimeError, match="authoritative setup failed"):
+            run_tool_execution_middleware(
+                "read_file", {"path": "private.txt"}, lambda args: calls.append(args)
+            )
+
+        assert calls == []
+
+    def test_fail_closed_execution_middleware_redacts_post_processing_failure(self, monkeypatch):
+        calls = []
+
+        def middleware(**kwargs):
+            result = kwargs["next_call"](kwargs["args"])
+            raise RuntimeError(f"could not redact {result}")
+
+        middleware._hermes_fail_closed = True
+        manager = types.SimpleNamespace(_middleware={"tool_execution": [middleware]})
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        result = run_tool_execution_middleware(
+            "read_file",
+            {"path": "private.txt"},
+            lambda args: calls.append(args) or "RAW PRIVATE SOURCE",
+        )
+        payload = json.loads(result)
+
+        assert calls == [{"path": "private.txt"}]
+        assert payload["middleware_error"] == "critical_post_processing_failed"
+        assert payload["raw_result_persisted"] is False
+        assert "RAW PRIVATE SOURCE" not in result
+
+    def test_register_middleware_marks_callback_fail_closed(self):
+        manager = PluginManager()
+        manifest = PluginManifest(name="critical-plugin", source="user")
+        ctx = PluginContext(manifest, manager)
+
+        def middleware(**kwargs):
+            return None
+
+        ctx.register_middleware("tool_execution", middleware, fail_closed=True)
+
+        assert middleware._hermes_fail_closed is True
+        assert manager._middleware["tool_execution"] == [middleware]
+
+    def test_execution_middleware_translated_downstream_failure_is_not_masked(self, monkeypatch):
+        calls = []
+
+        def middleware(**kwargs):
+            try:
+                return kwargs["next_call"](kwargs["args"])
+            except Exception as exc:
+                raise RuntimeError(f"translated downstream failure: {exc}") from exc
+
+        manager = types.SimpleNamespace(_middleware={"tool_execution": [middleware]})
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        def terminal(args):
+            calls.append(args)
+            raise RuntimeError("terminal failed")
+
+        with pytest.raises(RuntimeError, match="translated downstream failure: terminal failed"):
+            run_tool_execution_middleware("terminal", {"command": "false"}, terminal)
+
+        assert calls == [{"command": "false"}]
+
+    def test_execution_middleware_downstream_base_exception_is_not_wrapped(self, monkeypatch):
+        calls = []
+
+        def middleware(**kwargs):
+            try:
+                return kwargs["next_call"](kwargs["args"])
+            except Exception as exc:
+                raise RuntimeError(f"middleware should not catch base exception: {exc}") from exc
+
+        manager = types.SimpleNamespace(_middleware={"tool_execution": [middleware]})
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        def terminal(args):
+            calls.append(args)
+            raise KeyboardInterrupt()
+
+        with pytest.raises(KeyboardInterrupt):
+            run_tool_execution_middleware("terminal", {"command": "interrupt"}, terminal)
+
+        assert calls == [{"command": "interrupt"}]
+
+    def test_execution_middleware_double_next_call_does_not_run_terminal_twice(self, monkeypatch):
+        calls = []
+
+        def middleware(**kwargs):
+            first = kwargs["next_call"](kwargs["args"])
+            # Deliberate misuse: a second next_call() must not re-run the
+            # downstream tool. The chain surfaces it as an error and preserves
+            # the first (successful) downstream result.
+            kwargs["next_call"](kwargs["args"])
+            return first
+
+        manager = types.SimpleNamespace(_middleware={"tool_execution": [middleware]})
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        def terminal(args):
+            calls.append(args)
+            return "terminal-result"
+
+        result = run_tool_execution_middleware("terminal", {"command": "printf ok"}, terminal)
+
+        assert result == "terminal-result"
+        assert calls == [{"command": "printf ok"}]
+
+    def test_request_middleware_tolerates_non_deepcopyable_payload(self, monkeypatch):
+        import threading
+
+        recorded = {}
+
+        def middleware(**kwargs):
+            recorded["args"] = kwargs["args"]
+            return None
+
+        manager = types.SimpleNamespace(
+            _middleware={"tool_request": [middleware]},
+            invoke_middleware=lambda kind, **kwargs: [middleware(**kwargs)],
+        )
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        # threading.Lock is not deepcopyable; a hard deepcopy would raise.
+        args = {"command": "noop", "lock": threading.Lock()}
+        result = apply_tool_request_middleware("terminal", args)
+
+        # Middleware ran (payload was copied via the shallow fallback) and the
+        # non-deepcopyable member is shared by reference rather than aborting.
+        assert recorded["args"]["command"] == "noop"
+        assert result.payload["command"] == "noop"
+        assert result.payload["lock"] is args["lock"]
 
 
 
