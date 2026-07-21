@@ -3286,13 +3286,20 @@ class PluginContext:
 
     # -- middleware registration -------------------------------------------
 
-    def register_middleware(self, kind: str, callback: Callable) -> PluginRegistration:
+    def register_middleware(
+        self,
+        kind: str,
+        callback: Callable,
+        *,
+        fail_closed: bool = False,
+    ) -> PluginRegistration:
         """Register a behavior-changing middleware callback.
 
         Middleware is separate from observer hooks: request middleware may
         rewrite the effective payload, and execution middleware may wrap the
         real callback. Unknown kinds are stored for forward compatibility but
-        warned so plugin authors can catch typos.
+        warned so plugin authors can catch typos. ``fail_closed`` marks an
+        authoritative callback whose failure must stop the mediated operation.
         """
         if kind not in VALID_MIDDLEWARE:
             logger.warning(
@@ -3302,6 +3309,8 @@ class PluginContext:
                 kind,
                 ", ".join(sorted(VALID_MIDDLEWARE)),
             )
+        if fail_closed:
+            setattr(callback, "_hermes_fail_closed", True)
         callbacks = self._manager._middleware.setdefault(kind, [])
         callbacks.append(callback)
         handle = self._track(
@@ -3310,7 +3319,12 @@ class PluginContext:
                 self._manager._middleware, kind, callback
             ),
         )
-        logger.debug("Plugin %s registered middleware: %s", self.manifest.name, kind)
+        logger.debug(
+            "Plugin %s registered middleware: %s (fail_closed=%s)",
+            self.manifest.name,
+            kind,
+            fail_closed,
+        )
         return handle
 
     # -- skill registration -------------------------------------------------
@@ -5427,12 +5441,18 @@ class PluginManager:
                 if ret is not None:
                     results.append(ret)
             except Exception as exc:
+                fail_closed = bool(getattr(cb, "_hermes_fail_closed", False))
                 logger.warning(
-                    "Middleware '%s' callback %s raised: %s",
+                    "Middleware '%s' callback %s raised (fail_closed=%s): %s",
                     kind,
                     getattr(cb, "__name__", repr(cb)),
+                    fail_closed,
                     exc,
                 )
+                if fail_closed:
+                    from hermes_cli.middleware import CriticalMiddlewareError
+
+                    raise CriticalMiddlewareError(kind, cb, exc) from exc
         return results
 
     # -----------------------------------------------------------------------
