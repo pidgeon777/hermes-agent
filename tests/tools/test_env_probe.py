@@ -330,3 +330,27 @@ class TestRunBoundedByTimeout:
         assert elapsed < 3.0, f"_run blocked on grandchild for {elapsed:.1f}s"
         assert rc == 0, f"expected clean exit, got rc={rc} err={err!r}"
         assert out == "ok"
+
+
+def test_run_uses_hidden_windows_process_kwargs(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        kwargs["stdout"].write(b"ok")
+        return type("R", (), {"returncode": 0})()
+
+    marker = object()
+    monkeypatch.setattr(
+        env_probe,
+        "windows_hidden_popen_kwargs",
+        lambda: {"creationflags": 0x08000000, "startupinfo": marker},
+        raising=False,
+    )
+    monkeypatch.setattr(env_probe.subprocess, "run", fake_run)
+
+    rc, out, err = env_probe._run(["python", "--version"])
+
+    assert rc == 0 and out == "ok" and err == ""
+    assert captured["creationflags"] == 0x08000000
+    assert captured["startupinfo"] is marker

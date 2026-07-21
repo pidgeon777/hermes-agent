@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
-from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli._subprocess_compat import windows_hidden_popen_kwargs, windows_hide_flags
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -654,10 +654,13 @@ def _find_bash() -> str:
     # On machines with both WSL and Git for Windows, shutil.which("bash")
     # may return WSL's bash (which doesn't understand Windows paths and
     # will fail silently).  Explicit Git-for-Windows paths avoid that.
+    _user_profile = os.environ.get("USERPROFILE", "")
     for candidate in (
         os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
         os.path.join(_local_appdata, "Programs", "Git", "bin", "bash.exe") if _local_appdata else "",
+        os.path.join(_user_profile, "scoop", "apps", "git", "current", "usr", "bin", "bash.exe") if _user_profile else "",
+        os.path.join(_user_profile, "scoop", "apps", "git", "current", "bin", "bash.exe") if _user_profile else "",
     ):
         if candidate and os.path.isfile(candidate) and candidate not in candidates:
             candidates.append(candidate)
@@ -1374,7 +1377,7 @@ class LocalEnvironment(BaseEnvironment):
 
         _popen_cwd = self.cwd
 
-        _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
+        _popen_kwargs = windows_hidden_popen_kwargs() if _IS_WINDOWS else {}
 
         proc = subprocess.Popen(
             args,
