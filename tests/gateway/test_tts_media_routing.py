@@ -132,6 +132,34 @@ def _fake_runner(thread_meta):
 
 
 @pytest.mark.asyncio
+async def test_streaming_delivery_respects_disabled_bare_path_attachments(tmp_path):
+    event = _event(thread_id="topic-1")
+    local_file = tmp_path / "report.pdf"
+    local_file.write_bytes(b"%PDF")
+    adapter = SimpleNamespace(
+        name="test",
+        config=SimpleNamespace(auto_attach_local_paths=False),
+        extract_media=BasePlatformAdapter.extract_media,
+        extract_images=BasePlatformAdapter.extract_images,
+        extract_local_files=BasePlatformAdapter.extract_local_files,
+        send_voice=AsyncMock(return_value=SendResult(success=True, message_id="voice")),
+        send_document=AsyncMock(return_value=SendResult(success=True, message_id="doc")),
+        send_image_file=AsyncMock(return_value=SendResult(success=True, message_id="image")),
+        send_video=AsyncMock(return_value=SendResult(success=True, message_id="video")),
+    )
+
+    await GatewayRunner._deliver_media_from_response(
+        _fake_runner({"thread_id": "topic-1"}),
+        f"File available at {local_file}",
+        event,
+        adapter,
+    )
+
+    adapter.send_document.assert_not_awaited()
+    adapter.send_image_file.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_streaming_delivery_routes_telegram_flac_media_tag_to_document_sender(tmp_path, monkeypatch):
     event = _event(thread_id="topic-1")
     media_file = _allowed_media_path(tmp_path, monkeypatch, "speech.flac")

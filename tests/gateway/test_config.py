@@ -96,6 +96,21 @@ class TestPlatformConfigRoundtrip:
         restored = PlatformConfig.from_dict({"extra": {"typing_indicator": False}})
         assert restored.typing_indicator is False
 
+    def test_auto_attach_local_paths_defaults_true(self):
+        assert PlatformConfig().auto_attach_local_paths is True
+        assert PlatformConfig.from_dict({}).auto_attach_local_paths is True
+
+    def test_auto_attach_local_paths_roundtrip_false(self):
+        pc = PlatformConfig(enabled=True, auto_attach_local_paths=False)
+        restored = PlatformConfig.from_dict(pc.to_dict())
+        assert restored.auto_attach_local_paths is False
+
+    def test_auto_attach_local_paths_resolved_from_extra(self):
+        restored = PlatformConfig.from_dict(
+            {"extra": {"auto_attach_local_paths": "false"}}
+        )
+        assert restored.auto_attach_local_paths is False
+
     def test_typing_status_text_defaults_none(self):
         assert PlatformConfig().typing_status_text is None
         assert PlatformConfig.from_dict({}).typing_status_text is None

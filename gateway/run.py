@@ -1928,6 +1928,7 @@ from gateway.slash_commands import GatewaySlashCommandsMixin
 from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
+    LiteralReply,
     MessageEvent,
     MessageType,
     _prefix_within_utf16_limit,
@@ -11201,7 +11202,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     if asyncio.iscoroutine(result):
                         result = await result
-                    return str(result) if result else None
+                    return LiteralReply(str(result)) if result else None
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)
 
@@ -14592,8 +14593,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # producing false-positive bare-path matches with the MEDIA: prefix
             # glued on. This matches the chain order in gateway/platforms/base.py.
             _, cleaned = adapter.extract_images(cleaned)
-            local_files, _ = adapter.extract_local_files(cleaned)
-            local_files = BasePlatformAdapter.filter_local_delivery_paths(local_files)
+            local_files = []
+            if getattr(
+                getattr(adapter, "config", None), "auto_attach_local_paths", True
+            ):
+                local_files, _ = adapter.extract_local_files(cleaned)
+                local_files = BasePlatformAdapter.filter_local_delivery_paths(local_files)
 
             _thread_meta = self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
 
