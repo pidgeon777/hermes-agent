@@ -1321,7 +1321,11 @@ def run_conversation(
                     api_kwargs = _llm_request_mw.payload
                     _original_api_kwargs = _llm_request_mw.original_payload
                     _llm_middleware_trace = _llm_request_mw.trace
-                except Exception:
+                except Exception as _llm_middleware_error:
+                    from hermes_cli.middleware import CriticalMiddlewareError
+
+                    if isinstance(_llm_middleware_error, CriticalMiddlewareError):
+                        raise
                     _original_api_kwargs = dict(api_kwargs)
                     _llm_middleware_trace = []
 
