@@ -1044,6 +1044,18 @@ def _clear_backend_probe_cache() -> None:
     _BACKEND_PROBE_CACHE.clear()
 
 
+def _windows_release_without_subprocess() -> str:
+    """Return a friendly Windows release without platform.release()/cmd.exe."""
+    import sys
+    try:
+        version = sys.getwindowsversion()
+        if version.major == 10:
+            return "11" if version.build >= 22000 else "10"
+        return f"{version.major}.{version.minor}"
+    except (AttributeError, OSError):
+        return "Windows"
+
+
 def build_environment_hints() -> str:
     """Return environment-specific guidance for the system prompt.
 
@@ -1074,7 +1086,7 @@ def build_environment_hints() -> str:
         if is_wsl():
             host_lines.append("Host: WSL (Windows Subsystem for Linux)")
         elif sys.platform == "win32":
-            host_lines.append(f"Host: Windows ({platform.release()})")
+            host_lines.append(f"Host: Windows ({_windows_release_without_subprocess()})")
         elif sys.platform == "darwin":
             mac_ver = platform.mac_ver()[0]
             host_lines.append(f"Host: macOS ({mac_ver or platform.release()})")

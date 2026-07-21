@@ -1172,13 +1172,20 @@ class PluginContext:
 
     # -- middleware registration -------------------------------------------
 
-    def register_middleware(self, kind: str, callback: Callable) -> None:
+    def register_middleware(
+        self, kind: str, callback: Callable, *, fail_closed: bool = False,
+    ) -> None:
         """Register a behavior-changing middleware callback.
 
         Middleware is separate from observer hooks: request middleware may
         rewrite the effective payload, and execution middleware may wrap the
         real callback. Unknown kinds are stored for forward compatibility but
         warned so plugin authors can catch typos.
+
+        ``fail_closed`` is opt-in. When true, a callback failure is propagated
+        instead of silently falling through to the downstream operation. This
+        is intended for correctness boundaries such as authoritative source
+        mediation; existing middleware remains fail-open by default.
         """
         if kind not in VALID_MIDDLEWARE:
             logger.warning(
@@ -1188,8 +1195,15 @@ class PluginContext:
                 kind,
                 ", ".join(sorted(VALID_MIDDLEWARE)),
             )
+        if fail_closed:
+            setattr(callback, "_hermes_fail_closed", True)
         self._manager._middleware.setdefault(kind, []).append(callback)
-        logger.debug("Plugin %s registered middleware: %s", self.manifest.name, kind)
+        logger.debug(
+            "Plugin %s registered middleware: %s (fail_closed=%s)",
+            self.manifest.name,
+            kind,
+            fail_closed,
+        )
 
     # -- skill registration -------------------------------------------------
 
@@ -1947,12 +1961,18 @@ class PluginManager:
                 if ret is not None:
                     results.append(ret)
             except Exception as exc:
+                fail_closed = bool(getattr(cb, "_hermes_fail_closed", False))
                 logger.warning(
-                    "Middleware '%s' callback %s raised: %s",
+                    "Middleware '%s' callback %s raised (fail_closed=%s): %s",
                     kind,
                     getattr(cb, "__name__", repr(cb)),
+                    fail_closed,
                     exc,
                 )
+                if fail_closed:
+                    from hermes_cli.middleware import CriticalMiddlewareError
+
+                    raise CriticalMiddlewareError(kind, cb, exc) from exc
         return results
 
     # -----------------------------------------------------------------------
@@ -2344,6 +2364,24 @@ def get_plugin_command_handler(name: str) -> Optional[Callable]:
     """Return the handler for a plugin-registered slash command, or ``None``."""
     entry = _ensure_plugins_discovered()._plugin_commands.get(name)
     return entry["handler"] if entry else None
+
+
+def invoke_plugin_command(handler: Callable, raw_args: str, *, session_id: str = ""):
+    """Invoke a plugin command with session context when the handler supports it."""
+    import inspect
+
+    try:
+        parameters = inspect.signature(handler).parameters.values()
+    except (TypeError, ValueError):
+        return handler(raw_args)
+    accepts_session = any(
+        parameter.name == "session_id"
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_session:
+        return handler(raw_args, session_id=session_id)
+    return handler(raw_args)
 
 
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0

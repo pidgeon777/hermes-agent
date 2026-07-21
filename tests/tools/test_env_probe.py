@@ -155,3 +155,17 @@ class TestRobustness:
         result = env_probe.get_environment_probe_line()
         # Whatever the result is, it must be a string
         assert isinstance(result, str)
+
+
+def test_run_uses_hidden_windows_process_kwargs(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(env_probe, "windows_hidden_popen_kwargs", lambda: {
+        "creationflags": 0x08000000, "startupinfo": object(),
+    })
+    monkeypatch.setattr(env_probe.subprocess, "run", lambda cmd, **kwargs: captured.update(kwargs) or type(
+        "R", (), {"returncode": 0, "stdout": "ok", "stderr": ""}
+    )())
+    rc, out, err = env_probe._run(["python", "--version"])
+    assert rc == 0 and out == "ok"
+    assert captured["creationflags"] == 0x08000000
+    assert captured["startupinfo"] is not None

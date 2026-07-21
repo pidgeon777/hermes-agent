@@ -1759,6 +1759,7 @@ from gateway.slash_commands import GatewaySlashCommandsMixin
 from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
+    LiteralReply,
     MessageEvent,
     MessageType,
     _prefix_within_utf16_limit,
@@ -9969,17 +9970,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Plugin-registered slash commands
         if command:
             try:
-                from hermes_cli.plugins import get_plugin_command_handler
+                from hermes_cli.plugins import get_plugin_command_handler, invoke_plugin_command
                 # Normalize underscores to hyphens so Telegram's underscored
                 # autocomplete form matches plugin commands registered with
                 # hyphens. See hermes_cli/commands.py:_build_telegram_menu.
                 plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
                 if plugin_handler:
                     user_args = event.get_command_args().strip()
-                    result = plugin_handler(user_args)
+                    result = invoke_plugin_command(
+                        plugin_handler,
+                        user_args,
+                        session_id=self._session_key_for_source(event.source),
+                    )
                     if asyncio.iscoroutine(result):
                         result = await result
-                    return str(result) if result else None
+                    return LiteralReply(str(result)) if result else None
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)
 

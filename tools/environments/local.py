@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
-from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli._subprocess_compat import windows_hidden_popen_kwargs
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -547,11 +547,15 @@ def _find_bash() -> str:
     # Check known Git for Windows install locations before PATH lookup.
     # On machines with both WSL and Git for Windows, shutil.which("bash")
     # may return WSL's bash (which doesn't understand Windows paths and
-    # will fail silently).  Explicit Git-for-Windows paths avoid that.
+    # will fail silently).  Scoop's PATH entry is a launcher shim that
+    # respawns several console processes; prefer the real Git Bash binary.
+    _user_profile = os.environ.get("USERPROFILE", "")
     for candidate in (
         os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
         os.path.join(_local_appdata, "Programs", "Git", "bin", "bash.exe"),
+        os.path.join(_user_profile, "scoop", "apps", "git", "current", "usr", "bin", "bash.exe"),
+        os.path.join(_user_profile, "scoop", "apps", "git", "current", "bin", "bash.exe"),
     ):
         if candidate and os.path.isfile(candidate):
             return candidate
@@ -1030,7 +1034,7 @@ class LocalEnvironment(BaseEnvironment):
 
         _popen_cwd = self.cwd
 
-        _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
+        _popen_kwargs = windows_hidden_popen_kwargs() if _IS_WINDOWS else {}
 
         proc = subprocess.Popen(
             args,

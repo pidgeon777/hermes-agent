@@ -1,5 +1,6 @@
 """Tests for the Hermes plugin system (hermes_cli.plugins)."""
 
+import json
 import logging
 import sys
 import types
@@ -208,6 +209,31 @@ class TestPluginDiscovery:
         assert result == "terminal-result"
         assert calls == [{"command": "printf ok"}]
 
+    def test_critical_execution_middleware_post_next_call_error_redacts_downstream_result(self, monkeypatch):
+        calls = []
+
+        def critical_middleware(**kwargs):
+            result = kwargs["next_call"](kwargs["args"])
+            raise RuntimeError(f"authoritative post-processing failed after {result}")
+
+        critical_middleware._hermes_fail_closed = True
+        manager = types.SimpleNamespace(_middleware={"tool_execution": [critical_middleware]})
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        def terminal(args):
+            calls.append(args)
+            return "RAW-SENSITIVE-SOURCE"
+
+        result = run_tool_execution_middleware(
+            "search_files", {"pattern": "secret"}, terminal
+        )
+
+        assert calls == [{"pattern": "secret"}]
+        assert "RAW-SENSITIVE-SOURCE" not in result
+        parsed = json.loads(result)
+        assert parsed["middleware_error"] == "critical_post_processing_failed"
+        assert parsed["raw_result_persisted"] is False
+
     def test_execution_middleware_pre_next_call_error_fails_open_to_remaining_chain(self, monkeypatch):
         calls = []
 
@@ -230,6 +256,54 @@ class TestPluginDiscovery:
 
         assert result == {"command": "printf ok", "rewritten": True}
         assert calls == ["failing", "downstream", ("terminal", {"command": "printf ok", "rewritten": True})]
+
+    def test_critical_execution_middleware_pre_next_call_error_fails_closed(self, monkeypatch):
+        calls = []
+
+        def critical_middleware(**kwargs):
+            calls.append("critical")
+            raise RuntimeError("context source mediation failed")
+
+        critical_middleware._hermes_fail_closed = True
+        manager = types.SimpleNamespace(_middleware={"tool_execution": [critical_middleware]})
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        def terminal(args):
+            calls.append("terminal")
+            return args
+
+        with pytest.raises(RuntimeError, match="context source mediation failed"):
+            run_tool_execution_middleware("read_file", {"path": "main.c"}, terminal)
+
+        assert calls == ["critical"]
+
+    def test_register_middleware_can_mark_callback_fail_closed(self):
+        manager = PluginManager()
+        manifest = PluginManifest(name="critical-plugin")
+        context = PluginContext(manifest, manager)
+
+        def callback(**kwargs):
+            return kwargs["next_call"](kwargs["args"])
+
+        context.register_middleware("tool_execution", callback, fail_closed=True)
+
+        registered = manager._middleware["tool_execution"][0]
+        assert registered is callback
+        assert getattr(registered, "_hermes_fail_closed", False) is True
+
+    def test_critical_request_middleware_error_is_propagated(self, monkeypatch):
+        def critical_middleware(**kwargs):
+            raise RuntimeError("authoritative refresh failed")
+
+        critical_middleware._hermes_fail_closed = True
+        manager = PluginManager()
+        manager._middleware = {"llm_request": [critical_middleware]}
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        with pytest.raises(Exception, match="authoritative refresh failed") as caught:
+            apply_llm_request_middleware({"messages": []})
+
+        assert type(caught.value).__name__ == "CriticalMiddlewareError"
 
     def test_execution_middleware_translated_downstream_failure_is_not_masked(self, monkeypatch):
         calls = []

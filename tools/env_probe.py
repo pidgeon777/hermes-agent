@@ -37,6 +37,8 @@ import sys
 import threading
 from typing import Optional
 
+from hermes_cli._subprocess_compat import windows_hidden_popen_kwargs
+
 logger = logging.getLogger(__name__)
 
 # Module-level cache.  The probe result is deterministic for the
@@ -66,6 +68,7 @@ def _run(cmd: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
             timeout=timeout,
             check=False,
             stdin=subprocess.DEVNULL,
+            **windows_hidden_popen_kwargs(),
         )
         return result.returncode, (result.stdout or "").strip(), (result.stderr or "").strip()
     except FileNotFoundError:

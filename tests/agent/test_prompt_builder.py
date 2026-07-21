@@ -1169,6 +1169,16 @@ class TestEnvironmentHints:
         assert "hostname" not in result
         assert "WSL" not in result
 
+    def test_windows_environment_hints_do_not_call_platform_release(self, monkeypatch):
+        import agent.prompt_builder as _pb
+        import sys, platform
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(platform, "release", lambda: (_ for _ in ()).throw(AssertionError("must not spawn cmd /c ver")))
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        result = _pb.build_environment_hints()
+        assert "Host: Windows" in result
+
     def test_build_environment_hints_on_windows_local(self, monkeypatch):
         import agent.prompt_builder as _pb
         import sys

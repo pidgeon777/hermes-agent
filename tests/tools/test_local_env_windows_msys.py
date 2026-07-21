@@ -33,6 +33,30 @@ from tools.environments.local import (
 )
 
 
+def test_windows_hidden_popen_kwargs_include_startupinfo(monkeypatch):
+    import subprocess
+    from hermes_cli import _subprocess_compat as compat
+    monkeypatch.setattr(compat, "IS_WINDOWS", True)
+    kwargs = compat.windows_hidden_popen_kwargs()
+    assert kwargs["creationflags"] == compat.windows_hide_flags()
+    assert kwargs["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW
+    assert kwargs["startupinfo"].wShowWindow == subprocess.SW_HIDE
+
+
+class TestFindBashWindows:
+    def test_prefers_real_scoop_git_bash_over_shim(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        userprofile = tmp_path / "user"
+        real_bash = userprofile / "scoop" / "apps" / "git" / "current" / "usr" / "bin" / "bash.exe"
+        real_bash.parent.mkdir(parents=True)
+        real_bash.write_bytes(b"MZ")
+        monkeypatch.setenv("USERPROFILE", str(userprofile))
+        monkeypatch.delenv("HERMES_GIT_BASH_PATH", raising=False)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+        monkeypatch.setattr(local_mod.shutil, "which", lambda name: str(userprofile / "scoop" / "shims" / "bash.EXE"))
+        assert local_mod._find_bash() == str(real_bash)
+
+
 # ---------------------------------------------------------------------------
 # _msys_to_windows_path — pure-function unit tests
 # ---------------------------------------------------------------------------

@@ -419,6 +419,28 @@ class TestSearchHandler:
         )
 
     @patch("tools.file_tools._get_file_ops")
+    def test_search_private_structured_mode_keeps_machine_readable_matches(self, mock_get):
+        from tools.file_operations import SearchMatch, SearchResult
+
+        mock_ops = MagicMock()
+        mock_ops.search.return_value = SearchResult(
+            matches=[
+                SearchMatch(path="src/a.py", line_number=i + 1, content=f"needle {i}")
+                for i in range(6)
+            ],
+            total_count=6,
+        )
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import search_tool
+        result = json.loads(search_tool(
+            pattern="needle", target="content", _private_structured=True,
+        ))
+
+        assert len(result["matches"]) == 6
+        assert "matches_text" not in result
+
+    @patch("tools.file_tools._get_file_ops")
     def test_search_exception_returns_error(self, mock_get):
         mock_get.side_effect = RuntimeError("no terminal")
 

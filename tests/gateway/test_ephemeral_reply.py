@@ -29,6 +29,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
+    LiteralReply,
     MessageEvent,
     MessageType,
     SendResult,
@@ -289,6 +290,69 @@ async def test_process_message_ephemeral_reply_does_not_auto_upload_bare_paths(t
 
     event = _make_event(text="/new")
     session_key = "agent:main:telegram:private:42"
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ):
+        await adapter._process_message_background(event, session_key)
+
+    adapter._send_with_retry.assert_called_once()
+    assert adapter._send_with_retry.call_args.kwargs["content"] == reply_text
+    adapter.send_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_message_literal_reply_does_not_auto_upload_bare_paths(tmp_path):
+    """Persistent plugin command replies keep source/config paths as text."""
+    adapter = _delete_adapter()
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.send_document = AsyncMock(
+        return_value=SendResult(success=True, message_id="doc-1")
+    )
+    source_path = tmp_path / "Neovim.json"
+    source_path.write_bytes(b"{}")
+    reply_text = f"Context Runtime ON: {source_path} :: <set attivo dinamico>"
+
+    async def _handler(evt):
+        return LiteralReply(reply_text)
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="/context status")
+    session_key = "agent:main:whatsapp:dm:42"
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ):
+        await adapter._process_message_background(event, session_key)
+
+    adapter._send_with_retry.assert_called_once()
+    assert adapter._send_with_retry.call_args.kwargs["content"] == reply_text
+    adapter.send_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_attach_local_paths_false_suppresses_plain_response_paths(tmp_path):
+    """Platform toggle disables bare-path attachment heuristic globally."""
+    adapter = _delete_adapter()
+    adapter.config.auto_attach_local_paths = False
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.send_document = AsyncMock(
+        return_value=SendResult(success=True, message_id="doc-1")
+    )
+    source_path = tmp_path / "ordinary.json"
+    source_path.write_bytes(b"{}")
+    reply_text = f"File disponibile in {source_path}"
+
+    async def _handler(evt):
+        return reply_text
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="mostrami il file")
+    session_key = "agent:main:whatsapp:dm:42"
     with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
         adapter, "_keep_typing", new=AsyncMock()
     ):

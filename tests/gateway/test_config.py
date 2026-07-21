@@ -92,6 +92,22 @@ class TestPlatformConfigRoundtrip:
         # extra; from_dict must honor it there too (mirrors _grn fallback).
         restored = PlatformConfig.from_dict({"extra": {"typing_indicator": False}})
         assert restored.typing_indicator is False
+
+    def test_auto_attach_local_paths_defaults_true(self):
+        assert PlatformConfig().auto_attach_local_paths is True
+        assert PlatformConfig.from_dict({}).auto_attach_local_paths is True
+
+    def test_auto_attach_local_paths_roundtrip_false(self):
+        pc = PlatformConfig(enabled=True, auto_attach_local_paths=False)
+        restored = PlatformConfig.from_dict(pc.to_dict())
+        assert restored.auto_attach_local_paths is False
+
+    def test_auto_attach_local_paths_resolved_from_extra(self):
+        restored = PlatformConfig.from_dict(
+            {"extra": {"auto_attach_local_paths": "false"}}
+        )
+        assert restored.auto_attach_local_paths is False
+
     def test_channel_overrides_roundtrip(self):
         pc = PlatformConfig(
             enabled=True,

@@ -2,6 +2,7 @@
 """File Tools Module - LLM agent file manipulation tools."""
 
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -23,6 +24,63 @@ logger = logging.getLogger(__name__)
 
 
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
+
+
+def _canonical_text_sha256(path: str | Path, start_line: int | None = None,
+                           end_line: int | None = None) -> str:
+    """Hash UTF-8 text using normalized logical lines, matching /context."""
+    text = Path(path).read_text(encoding="utf-8-sig")
+    lines = text.splitlines()
+    if start_line is not None or end_line is not None:
+        first = max(1, int(start_line or 1))
+        last = max(first, int(end_line or len(lines)))
+        lines = lines[first - 1:last]
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+_TEXT_REVISION_CANONICALIZATION = "utf8-sig+logical-lf"
+
+
+def _read_revision(path: str | Path, start_line: int | None = None,
+                   end_line: int | None = None) -> dict:
+    """Build a compact, self-describing optimistic-concurrency revision."""
+    scope = "range" if start_line is not None or end_line is not None else "file"
+    revision = {
+        "token": _canonical_text_sha256(path, start_line=start_line, end_line=end_line),
+        "algorithm": "sha256",
+        "canonicalization": _TEXT_REVISION_CANONICALIZATION,
+        "scope": scope,
+        "complete": True,
+    }
+    if scope == "range":
+        revision["start_line"] = max(1, int(start_line or 1))
+        revision["end_line"] = max(revision["start_line"], int(end_line or start_line or 1))
+    return revision
+
+
+def _normalize_expected_revision(expected_revision) -> tuple[str, int | None, int | None, str | None]:
+    """Validate a read_file revision and return hash/range/error."""
+    if not isinstance(expected_revision, dict):
+        return "", None, None, "expected_revision must be the revision object returned by read_file"
+    if expected_revision.get("algorithm") != "sha256":
+        return "", None, None, "expected_revision uses an unsupported algorithm"
+    if expected_revision.get("canonicalization") != _TEXT_REVISION_CANONICALIZATION:
+        return "", None, None, "expected_revision uses an unsupported canonicalization"
+    if expected_revision.get("complete") is not True:
+        return "", None, None, "expected_revision must represent a complete read scope"
+    token = str(expected_revision.get("token") or "").strip().lower()
+    if len(token) != 64 or any(ch not in "0123456789abcdef" for ch in token):
+        return "", None, None, "expected_revision contains an invalid SHA-256 token"
+    scope = expected_revision.get("scope")
+    if scope == "file":
+        return token, None, None, None
+    if scope != "range":
+        return "", None, None, "expected_revision has an invalid scope"
+    start = expected_revision.get("start_line")
+    end = expected_revision.get("end_line")
+    if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
+        return "", None, None, "expected_revision contains an invalid range"
+    return token, start, end, None
 
 
 def _expand_tilde(path: str) -> str:
@@ -1384,7 +1442,37 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             result.content = redact_sensitive_text(result.content, file_read=True)
             result_dict["content"] = result.content
 
-        # Large-file hint: if the file is big and the caller didn't ask
+        # Return the exact canonical revision needed by patch/write_file so
+        # callers never need a separate terminal sha256sum round-trip. Do not
+        # expose a token when redaction changed model-visible content: that
+        # would authorize an edit against bytes the model was not allowed to see.
+        try:
+            revision_start = offset
+            visible_lines = max(0, len((result.content or "").splitlines()))
+            revision_end = revision_start + visible_lines - 1
+            source_lines = Path(_resolved).read_text(encoding="utf-8-sig").splitlines()
+            source_scope = "\n".join(source_lines[revision_start - 1:revision_end])
+            numbered_lines = (result.content or "").splitlines()
+            visible_parts = [line.split("|", 1)[1] if "|" in line else line for line in numbered_lines]
+            if visible_parts and visible_parts[-1] == "" and numbered_lines[-1].startswith(f"{revision_start + len(visible_parts) - 1}|"):
+                visible_parts.pop()
+            visible_scope = "\n".join(visible_parts)
+            visible_lines = len(visible_parts)
+            revision_end = revision_start + visible_lines - 1
+            source_scope = "\n".join(source_lines[revision_start - 1:revision_end])
+            if visible_lines and visible_scope == source_scope:
+                full_file = revision_start == 1 and revision_end == len(source_lines)
+                result_dict["revision"] = _read_revision(
+                    _resolved,
+                    None if full_file else revision_start,
+                    None if full_file else revision_end,
+                )
+            else:
+                result_dict["revision_omitted"] = "model-visible content differs from authoritative text"
+        except (OSError, UnicodeError, ValueError) as exc:
+            result_dict["revision_omitted"] = f"cannot compute canonical revision: {type(exc).__name__}"
+
+        # ── Large-file hint: if the file is big and the caller didn't ask
         # for a narrow window, nudge toward targeted reads.
         if (file_size and file_size > _LARGE_FILE_HINT_BYTES
                 and limit > 200
@@ -1637,7 +1725,9 @@ def _mark_verification_stale(
 
 def write_file_tool(path: str, content: str, task_id: str = "default",
                     cross_profile: bool = False,
-                    session_id: str | None = None) -> str:
+                    session_id: str | None = None,
+                    expected_sha256: str | None = None,
+                    expected_revision: dict | None = None) -> str:
     """Write content to a file.
 
     ``cross_profile`` opts out of the soft cross-Hermes-profile guard. The
@@ -1646,6 +1736,8 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     Pass ``True`` after explicit user direction — same shape as ``force``
     on the terminal tool.
     """
+    if isinstance(expected_sha256, str) and not expected_sha256.strip():
+        expected_sha256 = None
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
@@ -1659,6 +1751,14 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             "Strip read_file line-number prefixes or reconstruct the intended "
             "file contents before writing."
         )
+    if expected_revision is not None:
+        if expected_sha256 is not None:
+            return tool_error("Pass expected_revision or expected_sha256, not both")
+        expected_sha256, revision_start, revision_end, revision_error = _normalize_expected_revision(expected_revision)
+        if revision_error:
+            return tool_error(revision_error)
+        if revision_start is not None or revision_end is not None:
+            return tool_error("write_file requires a complete-file revision from read_file")
     try:
         # Resolve once for the registry lock + stale check.  Failures here
         # fall back to the legacy path — write proceeds, per-task staleness
@@ -1669,6 +1769,10 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             _resolved = None
 
         if _resolved is None:
+            if expected_sha256 is not None:
+                return tool_error(
+                    "STALE_CONTEXT: could not resolve target path for SHA-256 precondition"
+                )
             stale_warning = _check_file_staleness(path, task_id)
             file_ops = _get_file_ops(task_id)
             result = file_ops.write_file(path, content)
@@ -1684,6 +1788,28 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
         # subagents can't interleave on the same file.  Different paths
         # remain fully parallel.
         with file_state.lock_path(_resolved):
+            if expected_sha256 is not None:
+                expected = str(expected_sha256).strip().lower()
+                if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+                    return tool_error("expected_sha256 must be a 64-character hexadecimal SHA-256")
+                try:
+                    actual = _canonical_text_sha256(_resolved)
+                except FileNotFoundError:
+                    return tool_error(
+                        "STALE_CONTEXT: expected_sha256 requires an existing target file"
+                    )
+                except Exception as exc:
+                    return tool_error(
+                        f"STALE_CONTEXT: could not verify SHA-256 precondition: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                if actual != expected:
+                    return tool_error(
+                        "STALE_CONTEXT: target content no longer matches expected_sha256",
+                        expected_sha256=expected,
+                        actual_sha256=actual,
+                    )
+
             # Cross-agent staleness wins over per-task warning when both
             # fire — its message names the sibling subagent.
             cross_warning = file_state.check_stale(task_id, _resolved)
@@ -1721,13 +1847,27 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
 def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                new_string: str = None, replace_all: bool = False, patch: str = None,
                task_id: str = "default", cross_profile: bool = False,
-               session_id: str | None = None) -> str:
+               session_id: str | None = None, expected_sha256: str | None = None,
+               expected_start_line: int | None = None,
+               expected_end_line: int | None = None,
+               expected_revision: dict | None = None) -> str:
     """Patch a file using replace mode or V4A patch format.
 
     ``cross_profile`` opts out of the soft cross-Hermes-profile guard for
     targets under another profile's skills/plugins/cron/memories
     directory. Same shape as ``write_file``'s flag.
     """
+    if isinstance(expected_sha256, str) and not expected_sha256.strip():
+        expected_sha256 = None
+    if expected_revision is not None:
+        if expected_sha256 is not None:
+            return tool_error("Pass expected_revision or expected_sha256, not both")
+        expected_sha256, revision_start, revision_end, revision_error = _normalize_expected_revision(expected_revision)
+        if revision_error:
+            return tool_error(revision_error)
+        expected_start_line = revision_start
+        expected_end_line = revision_end
+
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
     _paths_to_check = []
     if path:
@@ -1826,6 +1966,35 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
 
             file_ops = _get_file_ops(task_id)
 
+            if expected_sha256 is not None:
+                if mode != "replace" or not path:
+                    return tool_error(
+                        "expected_sha256 is supported only for replace mode with an explicit path"
+                    )
+                expected = str(expected_sha256).strip().lower()
+                if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+                    return tool_error("expected_sha256 must be a 64-character hexadecimal SHA-256")
+                target = _path_to_resolved.get(path) or path
+                try:
+                    actual = _canonical_text_sha256(
+                        target,
+                        start_line=expected_start_line,
+                        end_line=expected_end_line,
+                    )
+                except Exception as exc:
+                    return tool_error(
+                        f"STALE_CONTEXT: could not verify SHA-256 precondition: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                if actual != expected:
+                    return tool_error(
+                        "STALE_CONTEXT: target content no longer matches expected_sha256",
+                        expected_sha256=expected,
+                        actual_sha256=actual,
+                        expected_start_line=expected_start_line,
+                        expected_end_line=expected_end_line,
+                    )
+
             if mode == "replace":
                 if not path:
                     return tool_error("path required")
@@ -1915,7 +2084,7 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
 def search_tool(pattern: str, target: str = "content", path: str = ".",
                 file_glob: str = None, limit: int = 50, offset: int = 0,
                 output_mode: str = "content", context: int = 0,
-                task_id: str = "default") -> str:
+                task_id: str = "default", _private_structured: bool = False) -> str:
     """Search for content or files."""
     try:
         offset, limit = normalize_search_pagination(offset, limit)
@@ -1972,7 +2141,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
             for m in result.matches:
                 if hasattr(m, 'content') and m.content:
                     m.content = redact_sensitive_text(m.content, file_read=True)
-        result_dict = result.to_dict(densify=True)
+        result_dict = result.to_dict(densify=not _private_structured)
 
         if omitted:
             result_dict["_omitted"] = (
@@ -2032,6 +2201,21 @@ WRITE_FILE_SCHEMA = {
         "properties": {
             "path": {"type": "string", "description": "Path to the file to write (will be created if it doesn't exist, overwritten if it does)"},
             "content": {"type": "string", "description": "Complete content to write to the file"},
+            "expected_revision": {
+                "type": "object",
+                "description": (
+                    "Preferred optimistic-concurrency precondition for overwriting an existing file. "
+                    "Pass the complete-file revision object returned by read_file; this avoids a separate sha256sum call. "
+                    "Omit for new files."
+                ),
+            },
+            "expected_sha256": {
+                "type": "string",
+                "description": (
+                    "Legacy raw SHA-256 optimistic-concurrency precondition. Prefer expected_revision from read_file. "
+                    "Omit for new files. Do not send an empty string or a placeholder hash."
+                ),
+            },
             "cross_profile": {
                 "type": "boolean",
                 "description": "Opt out of the cross-profile soft guard. Defaults to false. Set true ONLY after explicit user direction to edit another Hermes profile's skills/plugins/cron/memories — by default these writes are blocked with a warning because they affect a different profile than the one this session is running under.",
@@ -2083,6 +2267,24 @@ PATCH_SCHEMA = {
                 "type": "string",
                 "description": "REQUIRED when mode='patch'. V4A format patch content. Format:\n*** Begin Patch\n*** Update File: path/to/file\n@@ context hint @@\n context line\n-removed line\n+added line\n*** End Patch",
             },
+            "expected_revision": {
+                "type": "object",
+                "description": "Preferred optimistic-concurrency precondition for replace mode. Pass the revision object returned by read_file; its file/range scope is verified automatically without a sha256sum call.",
+            },
+            "expected_sha256": {
+                "type": "string",
+                "description": "Legacy raw SHA-256 optimistic-concurrency precondition for replace mode. Prefer expected_revision from read_file. Use with expected_start_line/expected_end_line for a selected range; omit the range for the complete file.",
+            },
+            "expected_start_line": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional 1-based first line covered by expected_sha256.",
+            },
+            "expected_end_line": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional inclusive last line covered by expected_sha256.",
+            },
             "cross_profile": {
                 "type": "boolean",
                 "description": "Opt out of the cross-profile soft guard. Defaults to false. Set true ONLY after explicit user direction to edit another Hermes profile's skills/plugins/cron/memories.",
@@ -2120,6 +2322,12 @@ def _handle_read_file(args, **kw):
 
 def _handle_write_file(args, **kw):
     tid = kw.get("task_id") or "default"
+    expected_sha256 = args.get("expected_sha256")
+    if not isinstance(expected_sha256, str) or not expected_sha256.strip():
+        expected_sha256 = None
+    expected_revision = args.get("expected_revision")
+    if not isinstance(expected_revision, dict):
+        expected_revision = None
     if not args.get("path") or not isinstance(args.get("path"), str):
         return tool_error(
             "write_file: missing required field 'path'. Re-emit the tool call with "
@@ -2142,17 +2350,35 @@ def _handle_write_file(args, **kw):
         path=args["path"], content=args["content"], task_id=tid,
         cross_profile=bool(args.get("cross_profile", False)),
         session_id=kw.get("session_id"),
+        expected_sha256=expected_sha256,
+        expected_revision=expected_revision,
     )
 
 
 def _handle_patch(args, **kw):
     tid = kw.get("task_id") or "default"
+    expected_revision = args.get("expected_revision")
+    if not isinstance(expected_revision, dict):
+        expected_revision = None
+    expected_sha256 = args.get("expected_sha256")
+    if not isinstance(expected_sha256, str):
+        expected_sha256 = None
+    expected_start_line = args.get("expected_start_line")
+    if not isinstance(expected_start_line, int):
+        expected_start_line = None
+    expected_end_line = args.get("expected_end_line")
+    if not isinstance(expected_end_line, int):
+        expected_end_line = None
     return patch_tool(
         mode=args.get("mode", "replace"), path=args.get("path"),
         old_string=args.get("old_string"), new_string=args.get("new_string"),
         replace_all=args.get("replace_all", False), patch=args.get("patch"), task_id=tid,
         cross_profile=bool(args.get("cross_profile", False)),
         session_id=kw.get("session_id"),
+        expected_sha256=expected_sha256,
+        expected_start_line=expected_start_line,
+        expected_end_line=expected_end_line,
+        expected_revision=expected_revision,
     )
 
 
@@ -2164,7 +2390,8 @@ def _handle_search_files(args, **kw):
     return search_tool(
         pattern=args.get("pattern", ""), target=target, path=args.get("path", "."),
         file_glob=args.get("file_glob"), limit=args.get("limit", 50), offset=args.get("offset", 0),
-        output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid)
+        output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid,
+        _private_structured=bool(args.get("_context_runtime_private_structured", False)))
 
 
 registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=100_000)

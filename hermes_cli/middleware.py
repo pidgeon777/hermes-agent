@@ -7,6 +7,7 @@ contract helpers here so agent-loop call sites and plugins share one vocabulary.
 
 from __future__ import annotations
 
+import json
 import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -32,6 +33,17 @@ VALID_MIDDLEWARE: set[str] = {
     LLM_REQUEST_MIDDLEWARE,
     LLM_EXECUTION_MIDDLEWARE,
 }
+
+
+class CriticalMiddlewareError(RuntimeError):
+    """A fail-closed middleware could not preserve its correctness contract."""
+
+    def __init__(self, kind: str, callback: Callable, original: BaseException):
+        self.kind = kind
+        self.callback = callback
+        self.original = original
+        name = getattr(callback, "__name__", repr(callback))
+        super().__init__(f"Critical middleware '{kind}' callback {name} failed: {original}")
 
 
 @dataclass
@@ -287,15 +299,26 @@ def _run_execution_chain(
         except _DownstreamExecutionError as exc:
             raise exc.original
         except Exception as exc:
+            fail_closed = bool(getattr(callback, "_hermes_fail_closed", False))
             logger.warning(
-                "Middleware '%s' callback %s raised: %s",
+                "Middleware '%s' callback %s raised (fail_closed=%s): %s",
                 kind,
                 getattr(callback, "__name__", repr(callback)),
+                fail_closed,
                 exc,
             )
             if next_succeeded:
+                if fail_closed:
+                    return json.dumps({
+                        "middleware_error": "critical_post_processing_failed",
+                        "middleware_kind": kind,
+                        "callback": getattr(callback, "__name__", "plugin"),
+                        "error": "critical middleware post-processing failed; downstream result redacted",
+                        "complete": True,
+                        "raw_result_persisted": False,
+                    }, ensure_ascii=False, separators=(",", ":"))
                 return next_result
-            if next_called:
+            if next_called or fail_closed:
                 raise
             return call_at(index + 1, payload)
 
