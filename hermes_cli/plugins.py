@@ -2367,6 +2367,24 @@ def get_plugin_command_handler(name: str) -> Optional[Callable]:
     return entry["handler"] if entry else None
 
 
+def invoke_plugin_command(handler: Callable, raw_args: str, *, session_id: str = ""):
+    """Invoke a plugin command with session context when the handler supports it."""
+    import inspect
+
+    try:
+        parameters = inspect.signature(handler).parameters.values()
+    except (TypeError, ValueError):
+        return handler(raw_args)
+    accepts_session = any(
+        parameter.name == "session_id"
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_session:
+        return handler(raw_args, session_id=session_id)
+    return handler(raw_args)
+
+
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0
 
 
