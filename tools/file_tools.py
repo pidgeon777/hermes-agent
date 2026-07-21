@@ -2056,7 +2056,7 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
 def search_tool(pattern: str, target: str = "content", path: str = ".",
                 file_glob: str = None, limit: int = 50, offset: int = 0,
                 output_mode: str = "content", context: int = 0,
-                task_id: str = "default") -> str:
+                task_id: str = "default", _private_structured: bool = False) -> str:
     """Search for content or files."""
     try:
         offset, limit = normalize_search_pagination(offset, limit)
@@ -2113,7 +2113,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
             for m in result.matches:
                 if hasattr(m, 'content') and m.content:
                     m.content = redact_sensitive_text(m.content, file_read=True)
-        result_dict = result.to_dict(densify=True)
+        result_dict = result.to_dict(densify=not _private_structured)
 
         if omitted:
             result_dict["_omitted"] = (
@@ -2347,7 +2347,8 @@ def _handle_search_files(args, **kw):
     return search_tool(
         pattern=args.get("pattern", ""), target=target, path=args.get("path", "."),
         file_glob=args.get("file_glob"), limit=args.get("limit", 50), offset=args.get("offset", 0),
-        output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid)
+        output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid,
+        _private_structured=bool(args.get("_context_runtime_private_structured", False)))
 
 
 registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=100_000)
