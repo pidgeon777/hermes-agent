@@ -2369,6 +2369,13 @@ def is_chat_level_not_found(exc: Optional[BaseException] = None, error_text: str
     return any(s in blob for s in _CHAT_LEVEL_NOT_FOUND_SUBSTRINGS)
 
 
+class LiteralReply(str):
+    """Persistent reply whose bare local paths remain literal text.
+
+    Explicit ``MEDIA:`` directives are still processed normally.
+    """
+
+
 class EphemeralReply(str):
     """System-notice reply that auto-deletes after a TTL.
 
@@ -5812,6 +5819,9 @@ class BasePlatformAdapter(ABC):
 
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)
+            suppress_bare_path_attachments = isinstance(
+                response, (EphemeralReply, LiteralReply)
+            )
             is_ephemeral_response = isinstance(response, EphemeralReply)
 
             # Slash-command handlers may return an EphemeralReply sentinel to
@@ -5880,7 +5890,10 @@ class BasePlatformAdapter(ABC):
                     logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
 
                 local_files = []
-                if not is_ephemeral_response:
+                auto_attach_local_paths = getattr(
+                    self.config, "auto_attach_local_paths", True
+                )
+                if auto_attach_local_paths and not suppress_bare_path_attachments:
                     # Auto-detect bare local file paths for native media delivery
                     # (helps small models that don't use MEDIA: syntax). Skip
                     # system/command notices so config paths stay visible text

@@ -29,6 +29,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
+    LiteralReply,
     MessageEvent,
     MessageType,
     SendResult,
@@ -202,6 +203,96 @@ async def test_process_message_unwraps_ephemeral_before_send():
     assert sent_text == "⚡ Stopped."
     # Auto-delete scheduled using the returned message_id
     assert ("42", "sent-1") in adapter.deleted
+
+
+@pytest.mark.asyncio
+async def test_process_message_ephemeral_reply_does_not_auto_upload_bare_paths(tmp_path):
+    """Tips/system notices may mention local paths; they must remain text."""
+    adapter = _delete_adapter()
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.send_document = AsyncMock(
+        return_value=SendResult(success=True, message_id="doc-1")
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model:\n  provider: test\n", encoding="utf-8")
+    reply_text = f"Tip: hermes chat --ignore-user-config skips {config_path}"
+
+    async def _handler(evt):
+        return EphemeralReply(reply_text, ttl_seconds=0)
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="/new")
+    session_key = "agent:main:telegram:private:42"
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ):
+        await adapter._process_message_background(event, session_key)
+
+    adapter._send_with_retry.assert_called_once()
+    assert adapter._send_with_retry.call_args.kwargs["content"] == reply_text
+    adapter.send_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_message_literal_reply_does_not_auto_upload_bare_paths(tmp_path):
+    adapter = _delete_adapter()
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.send_document = AsyncMock(
+        return_value=SendResult(success=True, message_id="doc-1")
+    )
+    source_path = tmp_path / "selection.json"
+    source_path.write_bytes(b"{}")
+    reply_text = f"Context status: {source_path}"
+
+    async def _handler(evt):
+        return LiteralReply(reply_text)
+
+    adapter.set_message_handler(_handler)
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ):
+        await adapter._process_message_background(
+            _make_event(text="/context status"),
+            "agent:main:telegram:private:42",
+        )
+
+    assert adapter._send_with_retry.call_args.kwargs["content"] == reply_text
+    adapter.send_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_attach_local_paths_false_suppresses_plain_response_paths(tmp_path):
+    adapter = _delete_adapter()
+    adapter.config.auto_attach_local_paths = False
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.send_document = AsyncMock(
+        return_value=SendResult(success=True, message_id="doc-1")
+    )
+    source_path = tmp_path / "ordinary.json"
+    source_path.write_bytes(b"{}")
+    reply_text = f"File available at {source_path}"
+
+    async def _handler(evt):
+        return reply_text
+
+    adapter.set_message_handler(_handler)
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ):
+        await adapter._process_message_background(
+            _make_event(text="show the file"),
+            "agent:main:telegram:private:42",
+        )
+
+    assert adapter._send_with_retry.call_args.kwargs["content"] == reply_text
+    adapter.send_document.assert_not_awaited()
 
 
 @pytest.mark.asyncio

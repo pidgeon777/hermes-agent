@@ -221,6 +221,9 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
 
     result = await runner._handle_message(_make_event("/status"))
 
+    from gateway.platforms.base import LiteralReply
+
+    assert isinstance(result, LiteralReply)
     assert result == "metrics dias:7"
     # First emit_collect fires on the original command; after rewrite the
     # dispatcher does NOT re-fire for the new command (one decision per turn).

@@ -620,6 +620,10 @@ class PlatformConfig:
     # gateway/platforms/base.py.
     typing_indicator: bool = True
 
+    # Auto-convert bare local paths in response text into native attachments.
+    # Explicit MEDIA: directives remain active when this heuristic is disabled.
+    auto_attach_local_paths: bool = True
+
     # Custom text for the working-state line on platforms whose typing
     # indicator renders text rather than a native bubble: Slack's
     # assistant.threads.setStatus line (shown next to the bot name; needs the
@@ -642,6 +646,7 @@ class PlatformConfig:
             "reply_to_mode": self.reply_to_mode,
             "gateway_restart_notification": self.gateway_restart_notification,
             "typing_indicator": self.typing_indicator,
+            "auto_attach_local_paths": self.auto_attach_local_paths,
         }
         if self.typing_status_text is not None:
             result["typing_status_text"] = self.typing_status_text
@@ -680,6 +685,10 @@ class PlatformConfig:
         if _typing is None:
             _typing = extra.get("typing_indicator")
 
+        _auto_attach = data.get("auto_attach_local_paths")
+        if _auto_attach is None:
+            _auto_attach = extra.get("auto_attach_local_paths")
+
         # typing_status_text takes the same two routes (top-level or bridged
         # into extra); string passthrough, no coercion.
         _typing_text = data.get("typing_status_text")
@@ -701,6 +710,7 @@ class PlatformConfig:
             reply_to_mode=data.get("reply_to_mode", "first"),
             gateway_restart_notification=_coerce_bool(_grn, True),
             typing_indicator=_coerce_bool(_typing, True),
+            auto_attach_local_paths=_coerce_bool(_auto_attach, True),
             typing_status_text=_typing_text,
             channel_overrides=channel_overrides,
             extra=extra,
@@ -1594,6 +1604,8 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["gateway_restart_notification"] = platform_cfg["gateway_restart_notification"]
                 if "typing_indicator" in platform_cfg:
                     bridged["typing_indicator"] = platform_cfg["typing_indicator"]
+                if "auto_attach_local_paths" in platform_cfg:
+                    bridged["auto_attach_local_paths"] = platform_cfg["auto_attach_local_paths"]
                 if "typing_status_text" in platform_cfg:
                     bridged["typing_status_text"] = platform_cfg["typing_status_text"]
                 # Bridge top-level port/host/secret into extra for platforms
