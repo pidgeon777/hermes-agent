@@ -3538,6 +3538,12 @@ class AIAgent:
         """
         self._last_activity_ts = time.time()
         self._last_activity_desc = desc
+        progress_writer = getattr(self, "_write_parallel_progress_snapshot", None)
+        if progress_writer is not None:
+            try:
+                progress_writer(desc)
+            except Exception:
+                pass
         if os.environ.get("HERMES_KANBAN_TASK"):
             try:
                 from tools.kanban_tools import heartbeat_current_worker_from_env
@@ -3548,6 +3554,55 @@ class AIAgent:
                 # covers import-time failures (kanban_tools unavailable,
                 # etc.) on niche deployment surfaces.
                 pass
+
+    def _write_parallel_progress_snapshot(self, desc: str) -> None:
+        """Write best-effort runtime progress for externally managed agents."""
+        progress_path = os.environ.get("HERMES_PARALLEL_PROGRESS_FILE")
+        activity_path = os.environ.get("HERMES_PARALLEL_ACTIVITY_LOG")
+        if not progress_path and not activity_path:
+            return
+
+        try:
+            updated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+            budget = getattr(self, "iteration_budget", None)
+            payload = {
+                "session_id": getattr(self, "session_id", None),
+                "model": getattr(self, "model", None),
+                "provider": getattr(self, "provider", None),
+                "api_call_count": getattr(self, "_api_call_count", 0),
+                "max_iterations": getattr(self, "max_iterations", None),
+                "budget_used": getattr(budget, "used", None),
+                "budget_max": getattr(budget, "max_total", None),
+                "current_tool": getattr(self, "_current_tool", None),
+                "last_activity_desc": desc,
+                "last_activity_ts": getattr(self, "_last_activity_ts", time.time()),
+                "updated_at": updated_at,
+                "task_id": os.environ.get("HERMES_PARALLEL_TASK_ID"),
+                "task_dir": os.environ.get("HERMES_PARALLEL_TASK_DIR"),
+            }
+
+            if progress_path:
+                target = Path(progress_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temporary = target.with_suffix(target.suffix + ".tmp")
+                temporary.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                temporary.replace(target)
+
+            if activity_path:
+                activity = Path(activity_path)
+                activity.parent.mkdir(parents=True, exist_ok=True)
+                with activity.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(
+                        f"{updated_at} | api={payload['api_call_count']}/"
+                        f"{payload['max_iterations']} | tool="
+                        f"{payload['current_tool'] or '-'} | {desc}\n"
+                    )
+        except Exception:
+            # Runtime telemetry must never break the agent loop.
+            pass
 
     def _capture_rate_limits(self, http_response: Any) -> None:
         """Parse x-ratelimit-* headers from an HTTP response and cache the state.
