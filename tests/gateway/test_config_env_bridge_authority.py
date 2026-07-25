@@ -46,6 +46,7 @@ def _run_gateway_import(hermes_home: Path, initial_env: dict[str, str]) -> dict[
             "HERMES_AGENT_TIMEOUT_WARNING",
             "HERMES_GATEWAY_BUSY_INPUT_MODE",
             "HERMES_GATEWAY_BUSY_TEXT_MODE",
+            "HERMES_GATEWAY_BUSY_VOICE_MODE",
             "HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT",
             "HERMES_TIMEZONE",
         ):
@@ -57,7 +58,20 @@ def _run_gateway_import(hermes_home: Path, initial_env: dict[str, str]) -> dict[
     env = dict(initial_env)
     env["HERMES_HOME"] = str(hermes_home)
     # Keep PATH / PYTHONPATH so venv imports resolve.
-    for k in ("PATH", "PYTHONPATH", "VIRTUAL_ENV", "HOME"):
+    for k in (
+        "PATH",
+        "PYTHONPATH",
+        "VIRTUAL_ENV",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+    ):
         if k in os.environ and k not in env:
             env[k] = os.environ[k]
 
@@ -154,6 +168,15 @@ def test_config_display_busy_text_mode_wins_over_stale_env(hermes_home: Path) ->
     env = _run_gateway_import(hermes_home, initial_env={})
 
     assert env.get("HERMES_GATEWAY_BUSY_TEXT_MODE") == "queue"
+
+
+def test_config_display_busy_voice_mode_wins_over_stale_env(hermes_home: Path) -> None:
+    _write_config(hermes_home, display_cfg={"busy_voice_mode": "steer"})
+    _write_env(hermes_home, {"HERMES_GATEWAY_BUSY_VOICE_MODE": "interrupt"})
+
+    env = _run_gateway_import(hermes_home, initial_env={})
+
+    assert env.get("HERMES_GATEWAY_BUSY_VOICE_MODE") == "steer"
 
 
 def test_config_timezone_wins_over_stale_env(hermes_home: Path) -> None:

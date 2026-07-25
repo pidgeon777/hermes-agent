@@ -98,6 +98,62 @@ def _make_adapter(platform_val="telegram"):
 class TestBusySessionAck:
     """User sends a message while agent is running — should get acknowledgment."""
 
+    def test_default_config_registers_busy_ack_and_voice_controls(self):
+        from hermes_cli.config import DEFAULT_CONFIG
+
+        display = DEFAULT_CONFIG["display"]
+        assert display["busy_ack_enabled"] is True
+        assert display["busy_steer_ack_enabled"] is True
+        assert display["busy_voice_mode"] == "inherit"
+
+    @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [
+            ("inherit", "inherit"),
+            ("interrupt", "interrupt"),
+            ("queue", "queue"),
+            ("steer", "steer"),
+            ("typo", "inherit"),
+        ],
+    )
+    def test_load_busy_voice_mode_normalizes_supported_values(
+        self,
+        monkeypatch,
+        configured,
+        expected,
+    ):
+        from gateway.run import GatewayRunner
+
+        monkeypatch.setenv("HERMES_GATEWAY_BUSY_VOICE_MODE", configured)
+
+        assert GatewayRunner._load_busy_voice_mode() == expected
+
+    @pytest.mark.parametrize(
+        ("message_type", "voice_mode", "expected"),
+        [
+            (MessageType.TEXT, "steer", "queue"),
+            (MessageType.VOICE, "inherit", "queue"),
+            (MessageType.VOICE, "interrupt", "interrupt"),
+            (MessageType.VOICE, "queue", "queue"),
+            (MessageType.VOICE, "steer", "steer"),
+        ],
+    )
+    def test_effective_busy_mode_applies_voice_override_only_to_voice_events(
+        self,
+        message_type,
+        voice_mode,
+        expected,
+    ):
+        from gateway.run import GatewayRunner
+
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "queue"
+        runner._busy_voice_mode = voice_mode
+        event = _make_event()
+        event.message_type = message_type
+
+        assert GatewayRunner._effective_busy_mode_for_event(runner, event) == expected
+
     @pytest.mark.asyncio
     async def test_handle_message_queue_mode_queues_without_interrupt(self):
         """Runner queue mode must not interrupt an active agent for text follow-ups."""
@@ -607,8 +663,11 @@ class TestBusySessionAck:
         assert "10 min" in content  # elapsed
 
     @pytest.mark.asyncio
-    async def test_telegram_omits_status_detail_by_default(self):
+    async def test_telegram_omits_status_detail_by_default(self, monkeypatch):
         """Telegram busy acks stay concise unless busy_ack_detail is enabled."""
+        import gateway.run as _gr
+
+        monkeypatch.setattr(_gr, "_load_gateway_config", lambda: {})
         runner, sentinel = _make_runner()
         runner._busy_input_mode = "interrupt"
         adapter = _make_adapter()

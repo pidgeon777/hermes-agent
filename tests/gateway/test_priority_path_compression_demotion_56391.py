@@ -32,7 +32,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
+from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
@@ -48,6 +48,17 @@ def _make_source() -> SessionSource:
 
 def _make_event(text: str) -> MessageEvent:
     return MessageEvent(text=text, source=_make_source(), message_id="m1")
+
+
+def _make_voice_event() -> MessageEvent:
+    return MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=_make_source(),
+        message_id="voice-1",
+        media_urls=["/tmp/priority-voice.ogg"],
+        media_types=["audio/ogg"],
+    )
 
 
 def _make_runner(*, compression_in_flight: bool):
@@ -108,6 +119,7 @@ def _make_runner(*, compression_in_flight: bool):
     runner._emit_gateway_run_progress = AsyncMock()
     runner._draining = False
     runner._busy_input_mode = "interrupt"
+    runner._busy_voice_mode = "inherit"
 
     # No subagents active — isolates the compression-demotion behavior from
     # the (already-correct) subagent-demotion branch.
@@ -156,3 +168,20 @@ async def test_priority_path_still_interrupts_without_compression_lock():
     await runner._handle_message(_make_event("still there?"))
 
     agent_mock.interrupt.assert_called_once_with("still there?")
+
+
+@pytest.mark.asyncio
+async def test_priority_path_voice_steer_transcribes_and_does_not_queue():
+    runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    runner._busy_voice_mode = "steer"
+    runner._transcribe_and_echo_pending_voice = AsyncMock(
+        return_value=('"priority steer"', ["priority steer"])
+    )
+    agent_mock.steer.return_value = True
+
+    await runner._handle_message(_make_voice_event())
+
+    runner._transcribe_and_echo_pending_voice.assert_awaited_once()
+    agent_mock.steer.assert_called_once_with('"priority steer"')
+    agent_mock.interrupt.assert_not_called()
+    assert sk not in runner.adapters[Platform.TELEGRAM]._pending_messages

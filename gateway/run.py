@@ -1768,6 +1768,8 @@ if _config_path.exists():
                 os.environ["HERMES_GATEWAY_BUSY_INPUT_MODE"] = str(_display_cfg["busy_input_mode"])
             if "busy_text_mode" in _display_cfg:
                 os.environ["HERMES_GATEWAY_BUSY_TEXT_MODE"] = str(_display_cfg["busy_text_mode"])
+            if "busy_voice_mode" in _display_cfg:
+                os.environ["HERMES_GATEWAY_BUSY_VOICE_MODE"] = str(_display_cfg["busy_voice_mode"])
             if "busy_ack_enabled" in _display_cfg:
                 os.environ["HERMES_GATEWAY_BUSY_ACK_ENABLED"] = str(_display_cfg["busy_ack_enabled"])
             # This process-level env var is documented as an override for
@@ -3040,6 +3042,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     _running_agents_ts: Dict[str, float] = {}
     _busy_input_mode: str = "interrupt"
     _busy_text_mode: str = "interrupt"
+    _busy_voice_mode: str = "inherit"
     _restart_drain_timeout: float = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     _exit_code: Optional[int] = None
     _draining: bool = False
@@ -3104,6 +3107,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._show_reasoning = self._load_show_reasoning()
         self._busy_input_mode = self._load_busy_input_mode()
         self._busy_text_mode = self._load_busy_text_mode()
+        self._busy_voice_mode = self._load_busy_voice_mode()
         self._restart_drain_timeout = self._load_restart_drain_timeout()
         self._provider_routing = self._load_provider_routing()
         self._fallback_model = self._load_fallback_model()
@@ -5356,6 +5360,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return "queue" if input_mode == "queue" else "interrupt"
 
     @staticmethod
+    def _load_busy_voice_mode() -> str:
+        """Resolve busy voice follow-up behavior independently of text.
+
+        ``inherit`` (the default) follows ``busy_input_mode``. Explicit
+        ``interrupt``/``queue``/``steer`` values override it for voice events.
+        Unknown values fail closed to ``inherit`` for backward compatibility.
+        """
+        mode = os.getenv("HERMES_GATEWAY_BUSY_VOICE_MODE", "").strip().lower()
+        if not mode:
+            cfg = _load_gateway_runtime_config()
+            mode = str(cfg_get(cfg, "display", "busy_voice_mode", default="") or "").strip().lower()
+        if mode in {"interrupt", "queue", "steer"}:
+            return mode
+        return "inherit"
+
+    def _effective_busy_mode_for_event(self, event: MessageEvent) -> str:
+        """Return the configured busy behavior for one inbound event."""
+        mode = self._busy_input_mode
+        if event.message_type == MessageType.VOICE:
+            voice_mode = getattr(self, "_busy_voice_mode", "inherit")
+            if voice_mode != "inherit":
+                mode = voice_mode
+        return mode
+
+    @staticmethod
     def _load_restart_drain_timeout() -> float:
         """Load graceful gateway restart/stop drain timeout in seconds."""
         raw = os.getenv("HERMES_RESTART_DRAIN_TIMEOUT", "").strip()
@@ -5854,7 +5883,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         running_agent = self._running_agents.get(session_key)
 
-        effective_mode = self._busy_input_mode
+        effective_mode = self._effective_busy_mode_for_event(event)
         busy_text_mode = getattr(self, "_busy_text_mode", "interrupt")
         if (
             event.message_type == MessageType.TEXT
@@ -5900,6 +5929,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         steered = False
         if effective_mode == "steer":
             steer_text = (event.text or "").strip()
+            if self._pending_event_audio_paths(event):
+                transcribed_text, successful_transcripts = await self._transcribe_and_echo_pending_voice(
+                    event,
+                    adapter,
+                    event.source,
+                    steer_text,
+                    log_context="Voice-busy-steer",
+                )
+                if successful_transcripts:
+                    steer_text = (transcribed_text or "").strip()
+                else:
+                    # Never steer a synthetic transcription-failure placeholder.
+                    # A failed speculative STT attempt must not poison the queued
+                    # event's one-shot cache: clear it so the normal next-turn
+                    # drain gets one clean retry with the original voice media.
+                    for attr in (
+                        "_gateway_pending_stt_text",
+                        "_gateway_pending_stt_transcripts",
+                    ):
+                        try:
+                            delattr(event, attr)
+                        except AttributeError:
+                            pass
+                    steer_text = ""
             can_steer = (
                 steer_text
                 and running_agent is not None
@@ -10652,15 +10705,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if self._queue_during_drain_enabled()
                     else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
                 )
-            if self._busy_input_mode == "queue":
+            effective_mode = self._effective_busy_mode_for_event(event)
+            if effective_mode == "queue":
                 logger.debug("PRIORITY queue follow-up for session %s", _quick_key)
                 self._queue_or_replace_pending_event(_quick_key, event)
                 return None
-            if self._busy_input_mode == "steer":
+            if effective_mode == "steer":
                 # Steer mode: inject text into the running agent mid-run via
                 # agent.steer().  Falls back to queue semantics if the payload
                 # is empty, the agent lacks steer(), or steer() rejects.
                 steer_text = (event.text or "").strip()
+                if self._pending_event_audio_paths(event):
+                    transcribed_text, successful_transcripts = await self._transcribe_and_echo_pending_voice(
+                        event,
+                        self._adapter_for_source(source),
+                        source,
+                        steer_text,
+                        log_context="Voice-priority-steer",
+                    )
+                    if successful_transcripts:
+                        steer_text = (transcribed_text or "").strip()
+                    else:
+                        for attr in (
+                            "_gateway_pending_stt_text",
+                            "_gateway_pending_stt_transcripts",
+                        ):
+                            try:
+                                delattr(event, attr)
+                            except AttributeError:
+                                pass
+                        steer_text = ""
                 steered = False
                 if steer_text and hasattr(running_agent, "steer"):
                     try:

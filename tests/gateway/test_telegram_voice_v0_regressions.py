@@ -276,6 +276,191 @@ async def test_busy_voice_interrupt_transcribes_before_pending_drain(monkeypatch
     )
 
 
+def _busy_voice_runner(adapter, *, input_mode="interrupt", voice_mode="inherit"):
+    runner = _runner(adapter)
+    runner._is_user_authorized = lambda _source: True
+    runner._draining = False
+    runner._running_agents = {}
+    runner._busy_input_mode = input_mode
+    runner._busy_text_mode = "interrupt"
+    runner._busy_voice_mode = voice_mode
+    runner._busy_ack_ts = {}
+    runner._queued_events = {}
+    runner._agent_has_active_subagents = lambda _agent: False
+    return runner
+
+
+def _busy_voice_event():
+    return MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=_source(),
+        media_urls=["/tmp/telegram-busy-voice.ogg"],
+        media_types=["audio/ogg"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_busy_voice_mode_steer_transcribes_and_steers_without_queue(monkeypatch):
+    adapter = SimpleNamespace(send=AsyncMock(), _pending_messages={})
+    runner = _busy_voice_runner(adapter, input_mode="interrupt", voice_mode="steer")
+    session_key = "telegram:dm:12345"
+    agent = MagicMock()
+    agent.steer.return_value = True
+    runner._running_agents[session_key] = agent
+    event = _busy_voice_event()
+    monkeypatch.setenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", "false")
+
+    with (
+        patch("tools.approval.has_blocking_approval", return_value=False),
+        patch(
+            "tools.transcription_tools.transcribe_audio",
+            return_value={"success": True, "transcript": "steer this", "provider": "mock"},
+        ) as mock_transcribe,
+    ):
+        handled = await runner._handle_active_session_busy_message(event, session_key)
+
+    assert handled is True
+    agent.steer.assert_called_once_with('"steer this"')
+    agent.interrupt.assert_not_called()
+    assert session_key not in adapter._pending_messages
+    mock_transcribe.assert_called_once_with("/tmp/telegram-busy-voice.ogg")
+
+
+@pytest.mark.asyncio
+async def test_busy_voice_mode_steer_rejection_queues_with_cached_stt_and_single_echo(monkeypatch):
+    adapter = SimpleNamespace(send=AsyncMock(), _pending_messages={})
+    runner = _busy_voice_runner(adapter, input_mode="interrupt", voice_mode="steer")
+    runner._should_echo_stt_transcripts = lambda: True
+    session_key = "telegram:dm:12345"
+    agent = MagicMock()
+    agent.steer.return_value = False
+    runner._running_agents[session_key] = agent
+    event = _busy_voice_event()
+    original_media_urls = list(event.media_urls)
+    original_media_types = list(event.media_types)
+    monkeypatch.setenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", "false")
+
+    with (
+        patch("tools.approval.has_blocking_approval", return_value=False),
+        patch(
+            "tools.transcription_tools.transcribe_audio",
+            return_value={"success": True, "transcript": "cached steer", "provider": "mock"},
+        ) as mock_transcribe,
+    ):
+        handled = await runner._handle_active_session_busy_message(event, session_key)
+        queued_event = adapter._pending_messages[session_key]
+        drain_text, drain_transcripts = await runner._transcribe_pending_audio_event_once(
+            queued_event,
+            queued_event.text,
+        )
+        await runner._echo_pending_stt_transcripts_once(
+            queued_event,
+            adapter,
+            event.source,
+            drain_transcripts,
+            metadata={},
+        )
+
+    assert handled is True
+    agent.steer.assert_called_once_with('"cached steer"')
+    agent.interrupt.assert_not_called()
+    assert queued_event is event
+    assert drain_text == '"cached steer"'
+    assert drain_transcripts == ["cached steer"]
+    assert event.media_urls == original_media_urls
+    assert event.media_types == original_media_types
+    mock_transcribe.assert_called_once_with("/tmp/telegram-busy-voice.ogg")
+    adapter.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_busy_voice_mode_queue_does_not_transcribe_or_interrupt(monkeypatch):
+    adapter = SimpleNamespace(send=AsyncMock(), _pending_messages={})
+    runner = _busy_voice_runner(adapter, input_mode="interrupt", voice_mode="queue")
+    session_key = "telegram:dm:12345"
+    agent = MagicMock()
+    runner._running_agents[session_key] = agent
+    event = _busy_voice_event()
+    monkeypatch.setenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", "false")
+
+    with (
+        patch("tools.approval.has_blocking_approval", return_value=False),
+        patch("tools.transcription_tools.transcribe_audio") as mock_transcribe,
+    ):
+        handled = await runner._handle_active_session_busy_message(event, session_key)
+
+    assert handled is True
+    agent.steer.assert_not_called()
+    agent.interrupt.assert_not_called()
+    assert adapter._pending_messages[session_key] is event
+    mock_transcribe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_busy_voice_mode_interrupt_overrides_general_steer(monkeypatch):
+    adapter = SimpleNamespace(send=AsyncMock(), _pending_messages={})
+    runner = _busy_voice_runner(adapter, input_mode="steer", voice_mode="interrupt")
+    session_key = "telegram:dm:12345"
+    agent = MagicMock()
+    runner._running_agents[session_key] = agent
+    event = _busy_voice_event()
+    monkeypatch.setenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", "false")
+
+    with (
+        patch("tools.approval.has_blocking_approval", return_value=False),
+        patch(
+            "tools.transcription_tools.transcribe_audio",
+            return_value={"success": True, "transcript": "stop this run", "provider": "mock"},
+        ),
+    ):
+        handled = await runner._handle_active_session_busy_message(event, session_key)
+
+    assert handled is True
+    agent.interrupt.assert_called_once_with('"stop this run"')
+    agent.steer.assert_not_called()
+    assert adapter._pending_messages[session_key] is event
+
+
+@pytest.mark.asyncio
+async def test_busy_voice_mode_steer_falls_back_to_queue_when_transcription_fails(monkeypatch):
+    adapter = SimpleNamespace(send=AsyncMock(), _pending_messages={})
+    runner = _busy_voice_runner(adapter, input_mode="interrupt", voice_mode="steer")
+    session_key = "telegram:dm:12345"
+    agent = MagicMock()
+    runner._running_agents[session_key] = agent
+    event = _busy_voice_event()
+    monkeypatch.setenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", "false")
+
+    with (
+        patch("tools.approval.has_blocking_approval", return_value=False),
+        patch(
+            "tools.transcription_tools.transcribe_audio",
+            side_effect=[
+                {"success": False, "error": "mock failure"},
+                {"success": True, "transcript": "retry succeeded", "provider": "mock"},
+            ],
+        ) as mock_transcribe,
+    ):
+        handled = await runner._handle_active_session_busy_message(event, session_key)
+        queued_event = adapter._pending_messages[session_key]
+        drain_text, drain_transcripts = await runner._transcribe_pending_audio_event_once(
+            queued_event,
+            queued_event.text,
+        )
+
+    assert handled is True
+    agent.steer.assert_not_called()
+    agent.interrupt.assert_not_called()
+    assert queued_event is event
+    assert event.text == ""
+    assert event.media_urls == ["/tmp/telegram-busy-voice.ogg"]
+    assert event.media_types == ["audio/ogg"]
+    assert drain_text == '"retry succeeded"'
+    assert drain_transcripts == ["retry succeeded"]
+    assert mock_transcribe.call_count == 2
+
+
 def test_telegram_audio_size_gate_rejects_oversized_media_before_download():
     adapter = object.__new__(TelegramAdapter)
     adapter._max_doc_bytes = 1024

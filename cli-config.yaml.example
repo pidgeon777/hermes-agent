@@ -1218,6 +1218,19 @@ display:
   # Toggle at runtime with /busy <interrupt|queue|steer>.
   busy_input_mode: interrupt
 
+  # Optional independent behavior for voice messages received while busy.
+  #   inherit:   Follow busy_input_mode (default)
+  #   interrupt: Transcribe, interrupt the current run, then process next turn
+  #   queue:     Preserve the voice event for the next turn without early STT
+  #   steer:     Transcribe once and inject the transcript after the next tool call
+  #              (falls back to queue if STT fails or the agent cannot steer)
+  busy_voice_mode: inherit
+
+  # Busy follow-up confirmation bubbles. Disabling busy_ack_enabled hides all
+  # interrupt/queue/steer acknowledgments without changing message handling.
+  busy_ack_enabled: true
+  busy_steer_ack_enabled: true
+
   # Background process notifications (gateway/messaging only).
   # Controls how chatty the process watcher is when you use
   # terminal(background=true, notify_on_complete=true) from Telegram/Discord/etc.
