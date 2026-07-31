@@ -95,9 +95,9 @@ def test_write_file_handler_treats_whitespace_expected_sha256_as_omitted(tmp_pat
     assert target.read_text(encoding="utf-8") == "new\n"
 
 
-def test_write_file_schema_says_to_omit_precondition_for_new_files():
+def test_write_file_schema_keeps_sha256_precondition_internal():
     from tools.file_tools import WRITE_FILE_SCHEMA
 
-    description = WRITE_FILE_SCHEMA["parameters"]["properties"]["expected_sha256"]["description"]
-    assert "Omit for new files" in description
-    assert "Do not send an empty string" in description
+    properties = WRITE_FILE_SCHEMA["parameters"]["properties"]
+    assert "expected_sha256" not in properties
+    assert "expected_revision" not in properties
