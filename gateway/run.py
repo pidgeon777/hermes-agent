@@ -2536,6 +2536,7 @@ from gateway.turn_context import TurnContext
 from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
+    LiteralReply,
     MessageEvent,
     MessageType,
     _prefix_within_utf16_limit,
@@ -17278,7 +17279,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     if asyncio.iscoroutine(result):
                         result = await result
-                    return str(result) if result else None
+                    return LiteralReply(str(result)) if result else None
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)
 
