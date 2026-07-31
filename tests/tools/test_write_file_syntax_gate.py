@@ -125,3 +125,26 @@ class TestFailClosedSyntaxGate:
         res = ops.write_file(str(target), content)
         assert res.error is None, res.error
         assert target.read_text() == content
+
+
+class TestValidateWriteCandidate:
+    def test_rejects_invalid_structured_content_without_writing(self, tmp_path: Path):
+        from tools.file_tools import validate_write_candidate
+        target = tmp_path / "candidate.json"
+        result = validate_write_candidate(str(target), '{"broken":')
+        assert result["ok"] is False
+        assert "syntax validation" in result["error"]
+        assert not target.exists()
+
+    def test_accepts_valid_content_without_writing(self, tmp_path: Path):
+        from tools.file_tools import validate_write_candidate
+        target = tmp_path / "candidate.json"
+        result = validate_write_candidate(str(target), '{"valid": true}')
+        assert result == {"ok": True}
+        assert not target.exists()
+
+    def test_rejects_write_denied_path(self):
+        from tools.file_tools import validate_write_candidate
+        result = validate_write_candidate(str(Path.home() / ".ssh" / "authorized_keys"), "key")
+        assert result["ok"] is False
+        assert "denied" in result["error"].lower() or "blocked" in result["error"].lower()

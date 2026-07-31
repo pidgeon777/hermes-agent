@@ -607,6 +607,24 @@ class TestSearchHints:
         assert "offset=100" in raw
 
 
+def test_search_tool_accepts_native_windows_absolute_path(tmp_path):
+    import json
+    from tools.file_tools import search_tool
+
+    target = tmp_path / "absolute-search"
+    target.mkdir()
+    (target / "sample.txt").write_text("absolute needle\n", encoding="utf-8")
+
+    result = json.loads(search_tool(
+        pattern="absolute needle", path=str(target), target="content",
+        task_id="windows-absolute-search",
+    ))
+
+    assert not result.get("error"), result
+    assert result["total_count"] == 1
+    assert result["matches"][0]["path"].endswith("sample.txt")
+
+
 # ---------------------------------------------------------------------------
 # PATCH_SCHEMA shape tests (issue #15524)
 # ---------------------------------------------------------------------------
