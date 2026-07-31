@@ -930,6 +930,19 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Input behavior while agent is running",
         "options": ["interrupt", "queue", "steer"],
     },
+    "display.busy_voice_mode": {
+        "type": "select",
+        "description": "Voice-message behavior while agent is running",
+        "options": ["inherit", "interrupt", "queue", "steer"],
+    },
+    "display.busy_ack_enabled": {
+        "type": "boolean",
+        "description": "Show gateway acknowledgments for busy follow-up messages",
+    },
+    "display.busy_steer_ack_enabled": {
+        "type": "boolean",
+        "description": "Show the acknowledgment after a successful busy steer",
+    },
     "approvals.mode": {
         "type": "select",
         "description": "Dangerous command approval mode",

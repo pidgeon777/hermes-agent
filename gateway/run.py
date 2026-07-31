@@ -2041,6 +2041,8 @@ if _config_path.exists():
                 os.environ["HERMES_GATEWAY_BUSY_INPUT_MODE"] = str(_display_cfg["busy_input_mode"])
             if "busy_text_mode" in _display_cfg:
                 os.environ["HERMES_GATEWAY_BUSY_TEXT_MODE"] = str(_display_cfg["busy_text_mode"])
+            if "busy_voice_mode" in _display_cfg:
+                os.environ["HERMES_GATEWAY_BUSY_VOICE_MODE"] = str(_display_cfg["busy_voice_mode"])
             if "busy_ack_enabled" in _display_cfg:
                 os.environ["HERMES_GATEWAY_BUSY_ACK_ENABLED"] = str(_display_cfg["busy_ack_enabled"])
             # This process-level env var is documented as an override for
@@ -5409,6 +5411,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     # blow up on attribute access.
     _busy_input_mode: str = "interrupt"
     _busy_text_mode: str = "interrupt"
+    _busy_voice_mode: str = "inherit"
     _restart_drain_timeout: float = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     _exit_code: Optional[int] = None
     _draining: bool = False
@@ -5545,6 +5548,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._show_reasoning = self._load_show_reasoning()
         self._busy_input_mode = self._load_busy_input_mode()
         self._busy_text_mode = self._load_busy_text_mode()
+        self._busy_voice_mode = self._load_busy_voice_mode()
         self._restart_drain_timeout = self._load_restart_drain_timeout()
         self._provider_routing = self._load_provider_routing()
         self._fallback_model = self._load_fallback_model()
@@ -7944,6 +7948,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return "queue" if input_mode == "queue" else "interrupt"
 
     @staticmethod
+    def _load_busy_voice_mode() -> str:
+        """Resolve busy voice behavior independently of normal text input."""
+        mode = os.getenv("HERMES_GATEWAY_BUSY_VOICE_MODE", "").strip().lower()
+        if not mode:
+            cfg = _load_gateway_runtime_config()
+            mode = str(
+                cfg_get(cfg, "display", "busy_voice_mode", default="") or ""
+            ).strip().lower()
+        return mode if mode in {"interrupt", "queue", "steer"} else "inherit"
+
+    def _effective_busy_mode_for_event(self, event: MessageEvent) -> str:
+        """Return the configured busy behavior for one inbound event."""
+        if event.message_type == MessageType.VOICE:
+            voice_mode = getattr(self, "_busy_voice_mode", "inherit")
+            if voice_mode != "inherit":
+                return voice_mode
+        return self._busy_input_mode
+
+    @staticmethod
     def _load_restart_drain_timeout() -> float:
         """Load graceful gateway restart/stop drain timeout in seconds."""
         raw = os.getenv("HERMES_RESTART_DRAIN_TIMEOUT", "").strip()
@@ -8490,7 +8513,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _busy_state = self._peek_session_state(session_key)
         running_agent = _busy_state.turn.agent if _busy_state else None
 
-        effective_mode = self._busy_input_mode
+        effective_mode = self._effective_busy_mode_for_event(event)
         busy_text_mode = getattr(self, "_busy_text_mode", "interrupt")
         if (
             event.message_type == MessageType.TEXT
@@ -14084,21 +14107,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if self._queue_during_drain_enabled()
                     else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
                 )
-            if self._busy_input_mode == "queue":
+            effective_mode = self._effective_busy_mode_for_event(event)
+            if effective_mode == "queue":
                 logger.debug("PRIORITY queue follow-up for session %s", _quick_key)
                 self._queue_or_replace_pending_event(_quick_key, event)
                 return None
-            if self._busy_input_mode == "steer":
+            if effective_mode == "steer":
                 # Steer mode: inject text into the running agent mid-run via
                 # agent.steer().  Falls back to queue semantics if the payload
                 # is empty, the agent lacks steer(), or steer() rejects.
-                steer_text = (event.text or "").strip()
+                steer_text = await self._prepare_busy_steer_text(event)
                 steered = False
+                _voice_media = getattr(event, "media_urls", None) or []
+                _all_voice = bool(_voice_media) and (
+                    len(self._pending_event_audio_paths(event)) == len(_voice_media)
+                )
                 if (
-                    event.message_type == MessageType.TEXT
-                    and not event.media_urls
-                    and not event.media_types
-                    and steer_text
+                    steer_text
+                    and (
+                        (
+                            event.message_type == MessageType.TEXT
+                            and not event.media_urls
+                            and not event.media_types
+                        )
+                        or _all_voice
+                    )
                     and hasattr(running_agent, "steer")
                 ):
                     try:

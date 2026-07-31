@@ -412,8 +412,17 @@ By default, messaging a busy agent redirects its active turn. Two other modes ar
 ```yaml
 display:
   busy_input_mode: steer   # or queue, or interrupt (default)
+  busy_voice_mode: inherit # inherit, steer, queue, or interrupt
   busy_ack_enabled: true   # set to false to suppress the ⚡/⏳/⏩ chat reply entirely
 ```
+
+`busy_voice_mode` optionally overrides the general mode for voice messages. In
+`steer` mode Hermes transcribes the voice message once and injects the transcript
+into the active run; if transcription fails or the active agent cannot accept a
+steer, the original voice event is queued intact for the next turn. `queue` does
+not transcribe early, while `interrupt` transcribes before interrupting so the
+new instruction is immediately available to the replacement turn. The default
+`inherit` preserves the behavior selected by `busy_input_mode`.
 
 The first time you message a busy agent on any platform, Hermes appends a one-line reminder to the busy-ack explaining the knob (`"💡 First-time tip — …"`). The reminder fires once per install — a flag under `onboarding.seen.busy_input_prompt` latches it. Delete that key to see the tip again.
 

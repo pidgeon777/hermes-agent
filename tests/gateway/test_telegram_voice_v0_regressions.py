@@ -276,3 +276,33 @@ def _voice_event(source, urls):
     )
 
 
+
+
+def test_busy_voice_mode_defaults_to_inherit(monkeypatch):
+    monkeypatch.delenv("HERMES_GATEWAY_BUSY_VOICE_MODE", raising=False)
+    with patch("gateway.run._load_gateway_runtime_config", return_value={}):
+        assert GatewayRunner._load_busy_voice_mode() == "inherit"
+
+
+def test_busy_voice_mode_accepts_explicit_steer(monkeypatch):
+    monkeypatch.setenv("HERMES_GATEWAY_BUSY_VOICE_MODE", "steer")
+    assert GatewayRunner._load_busy_voice_mode() == "steer"
+
+
+def test_busy_voice_override_is_independent_from_text():
+    runner = _runner()
+    runner._busy_input_mode = "interrupt"
+    runner._busy_voice_mode = "queue"
+    voice = _voice_event(_source(), ["/tmp/voice.ogg"])
+    text = MessageEvent(text="follow up", message_type=MessageType.TEXT, source=_source())
+    assert runner._effective_busy_mode_for_event(voice) == "queue"
+    assert runner._effective_busy_mode_for_event(text) == "interrupt"
+
+
+def test_busy_voice_inherit_follows_general_mode():
+    runner = _runner()
+    runner._busy_input_mode = "steer"
+    runner._busy_voice_mode = "inherit"
+    assert runner._effective_busy_mode_for_event(
+        _voice_event(_source(), ["/tmp/voice.ogg"])
+    ) == "steer"

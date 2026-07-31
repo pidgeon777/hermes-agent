@@ -991,6 +991,9 @@ DEFAULT_CONFIG = {
         # behavior of showing tool-call summaries inline.
         "resume_skip_tool_only": True,
         "busy_input_mode": "interrupt",  # interrupt | queue | steer
+        # Voice follow-ups can independently inherit the general busy mode or
+        # choose interrupt/queue/steer.
+        "busy_voice_mode": "inherit",  # inherit | interrupt | queue | steer
         # When busy_input_mode="steer", suppress only the visible
         # "Steered into current run" confirmation bubble by setting this false.
         # The mid-turn steering itself still happens.
