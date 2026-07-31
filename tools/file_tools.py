@@ -11,10 +11,12 @@ import sys
 import threading
 from pathlib import Path, PurePosixPath
 
-from agent.file_safety import get_read_block_error
+from agent.file_safety import get_read_block_error, get_write_denied_error
 from tools.binary_extensions import has_binary_extension
 from tools.file_operations import (
+    LINTERS_INPROC,
     ShellFileOperations,
+    _FAIL_CLOSED_INPROC_EXTS,
     normalize_read_pagination,
     normalize_search_pagination,
 )
@@ -60,6 +62,8 @@ def _read_revision(path: str | Path, start_line: int | None = None,
 
 
 def _normalize_expected_revision(expected_revision):
+    if not expected_revision:
+        return None, None, None, None
     if not isinstance(expected_revision, dict):
         return "", None, None, "expected_revision must be the revision object returned by read_file"
     if expected_revision.get("algorithm") != "sha256":
@@ -780,6 +784,46 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
         mirror_prefix=_get_container_mirror_prefix_for_task(task_id),
     )
 
+
+
+def validate_write_candidate(filepath: str, content: str, task_id: str = "default",
+                             cross_profile: bool = False) -> dict:
+    """Validate a prospective file mutation without producing side effects.
+
+    This is the generic safety boundary used by non-filesystem authorities
+    (for example editor buffers) before committing candidate text. It mirrors
+    the core file-tool deny, cross-profile and fail-closed structured-syntax
+    gates while intentionally performing no read, write, mkdir, lint process,
+    LSP call or cache invalidation.
+    """
+    if not isinstance(filepath, str) or not filepath:
+        return {"ok": False, "error": "A non-empty file path is required"}
+    if not isinstance(content, str):
+        return {"ok": False, "error": "Candidate content must be a string"}
+    try:
+        resolved = str(_resolve_path_for_task(filepath, task_id))
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": f"Invalid file path: {exc}"}
+    denied = get_write_denied_error(resolved)
+    if denied:
+        return {"ok": False, "error": denied}
+    if not cross_profile:
+        warning = _check_cross_profile_path(resolved, task_id)
+        if warning:
+            return {"ok": False, "error": warning}
+    ext = os.path.splitext(resolved)[1].lower()
+    linter = LINTERS_INPROC.get(ext) if ext in _FAIL_CLOSED_INPROC_EXTS else None
+    if linter is not None:
+        ok, lint_error = linter(content)
+        if not ok and lint_error != "__SKIP__":
+            return {
+                "ok": False,
+                "error": (
+                    f"Refusing to write '{resolved}': candidate content fails "
+                    f"{ext} syntax validation ({lint_error}). The target was NOT modified."
+                ),
+            }
+    return {"ok": True}
 
 def _is_expected_write_exception(exc: Exception) -> bool:
     """Return True for expected write denials that should not hit error logs."""
@@ -1691,6 +1735,8 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     """
     if isinstance(expected_sha256, str) and not expected_sha256.strip():
         expected_sha256 = None
+    if not expected_revision:
+        expected_revision = None
     if expected_revision is not None:
         if expected_sha256 is not None:
             return tool_error("Pass expected_revision or expected_sha256, not both")
@@ -1819,6 +1865,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     """
     if isinstance(expected_sha256, str) and not expected_sha256.strip():
         expected_sha256 = None
+    if not expected_revision:
+        expected_revision = None
     if expected_revision is not None:
         if expected_sha256 is not None:
             return tool_error("Pass expected_revision or expected_sha256, not both")
@@ -2158,19 +2206,22 @@ READ_FILE_SCHEMA = {
 
 WRITE_FILE_SCHEMA = {
     "name": "write_file",
-    "description": "Write content to a file, completely replacing existing content. Use this instead of echo/cat heredoc in terminal. Creates parent directories automatically. OVERWRITES the entire file — use 'patch' for targeted edits. Auto-runs syntax checks on .py/.json/.yaml/.toml and other linted languages; only NEW errors introduced by this write are surfaced (pre-existing errors are filtered out).",
+    "description": "Write complete content through an explicit persistence policy. Default persistence='auto' preserves normal file behavior and creates parent directories when writing disk. persistence='buffer-only' requires live Neovim, changes or creates only a named dirty buffer, and never creates files, directories, or swapfiles; the user saves later with :write. persistence='save' explicitly persists and requires allow_save_preexisting_dirty=true before saving pre-existing manual dirty edits. Use 'patch' for targeted edits. Auto-runs syntax checks before mutation.",
     "parameters": {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Path to the file to write (will be created if it doesn't exist, overwritten if it does)"},
             "content": {"type": "string", "description": "Complete content to write to the file"},
-            "expected_revision": {
-                "type": "object",
-                "description": "Preferred optimistic-concurrency precondition for overwriting an existing file. Pass the complete-file revision object returned by read_file; omit for new files.",
-            },
-            "expected_sha256": {
+            "persistence": {
                 "type": "string",
-                "description": "Legacy raw SHA-256 optimistic-concurrency precondition. Prefer expected_revision from read_file. Omit for new files. Do not send an empty string or a placeholder hash.",
+                "enum": ["auto", "buffer-only", "save"],
+                "description": "Persistence policy. 'auto' preserves normal behavior. 'buffer-only' requires an enabled live Context Runtime and changes only a Neovim buffer, never disk. 'save' explicitly persists the result; saving a buffer that was already dirty also requires allow_save_preexisting_dirty=true.",
+                "default": "auto",
+            },
+            "allow_save_preexisting_dirty": {
+                "type": "boolean",
+                "description": "Allow persistence='save' to save a Neovim buffer that was already dirty, including pre-existing manual edits. Defaults to false.",
+                "default": False,
             },
             "cross_profile": {
                 "type": "boolean",
@@ -2185,9 +2236,10 @@ WRITE_FILE_SCHEMA = {
 PATCH_SCHEMA = {
     "name": "patch",
     "description": (
-        "Targeted find-and-replace edits in files. Use this instead of sed/awk in terminal. "
-        "Uses fuzzy matching (9 strategies) so minor whitespace/indentation differences won't break it. "
-        "Returns a unified diff. Auto-runs syntax checks after editing.\n\n"
+        "Targeted find-and-replace edits with an explicit persistence policy. Use this instead of sed/awk in terminal. "
+        "Default persistence='auto' preserves normal behavior. persistence='buffer-only' requires live Neovim, changes only a loaded buffer, and never saves disk. "
+        "persistence='save' explicitly persists and requires consent before saving pre-existing dirty edits. "
+        "Uses fuzzy matching (9 strategies), returns a unified diff, and auto-runs syntax checks before mutation.\n\n"
         "REPLACE MODE (mode='replace', default): find a unique string and replace it. "
         "REQUIRED PARAMETERS: mode, path, old_string, new_string.\n"
         "PATCH MODE (mode='patch'): apply V4A multi-file patches for bulk changes. "
@@ -2219,20 +2271,21 @@ PATCH_SCHEMA = {
                 "description": "Replace all occurrences instead of requiring a unique match (default: false)",
                 "default": False,
             },
+            "persistence": {
+                "type": "string",
+                "enum": ["auto", "buffer-only", "save"],
+                "description": "Persistence policy for replace mode. 'buffer-only' requires an enabled live Context Runtime and never writes disk. 'save' explicitly persists the result; saving a pre-existing dirty buffer also requires allow_save_preexisting_dirty=true. V4A patch mode supports only 'auto' or 'save'.",
+                "default": "auto",
+            },
+            "allow_save_preexisting_dirty": {
+                "type": "boolean",
+                "description": "Allow persistence='save' to save a Neovim buffer that was already dirty, including pre-existing manual edits. Defaults to false.",
+                "default": False,
+            },
             "patch": {
                 "type": "string",
                 "description": "REQUIRED when mode='patch'. V4A format patch content. Format:\n*** Begin Patch\n*** Update File: path/to/file\n@@ context hint @@\n context line\n-removed line\n+added line\n*** End Patch",
             },
-            "expected_revision": {
-                "type": "object",
-                "description": "Preferred optimistic-concurrency precondition for replace mode. Pass the revision object returned by read_file.",
-            },
-            "expected_sha256": {
-                "type": "string",
-                "description": "Legacy raw SHA-256 precondition for replace mode. Use optional expected_start_line/expected_end_line for a selected range.",
-            },
-            "expected_start_line": {"type": "integer", "minimum": 1},
-            "expected_end_line": {"type": "integer", "minimum": 1},
             "cross_profile": {
                 "type": "boolean",
                 "description": "Opt out of the cross-profile soft guard. Defaults to false. Set true ONLY after explicit user direction to edit another Hermes profile's skills/plugins/cron/memories.",
@@ -2274,7 +2327,7 @@ def _handle_write_file(args, **kw):
     if not isinstance(expected_sha256, str) or not expected_sha256.strip():
         expected_sha256 = None
     expected_revision = args.get("expected_revision")
-    if not isinstance(expected_revision, dict):
+    if not isinstance(expected_revision, dict) or not expected_revision:
         expected_revision = None
     if not args.get("path") or not isinstance(args.get("path"), str):
         return tool_error(
@@ -2294,6 +2347,16 @@ def _handle_write_file(args, **kw):
             f"write_file: 'content' must be a string, got "
             f"{type(args['content']).__name__}."
         )
+    persistence = args.get("persistence")
+    if not isinstance(persistence, str) or not persistence.strip():
+        persistence = "auto"
+    if persistence not in {"auto", "buffer-only", "save"}:
+        return tool_error("write_file: persistence must be one of auto, buffer-only, save")
+    if persistence == "buffer-only":
+        return tool_error(
+            "write_file: persistence='buffer-only' requires an enabled live Context Runtime "
+            "bound to Neovim; refusing disk fallback"
+        )
     return write_file_tool(
         path=args["path"], content=args["content"], task_id=tid,
         cross_profile=bool(args.get("cross_profile", False)),
@@ -2306,7 +2369,7 @@ def _handle_write_file(args, **kw):
 def _handle_patch(args, **kw):
     tid = kw.get("task_id") or "default"
     expected_revision = args.get("expected_revision")
-    if not isinstance(expected_revision, dict):
+    if not isinstance(expected_revision, dict) or not expected_revision:
         expected_revision = None
     expected_sha256 = args.get("expected_sha256")
     if not isinstance(expected_sha256, str):
@@ -2317,6 +2380,18 @@ def _handle_patch(args, **kw):
     expected_end_line = args.get("expected_end_line")
     if not isinstance(expected_end_line, int):
         expected_end_line = None
+    persistence = args.get("persistence")
+    if not isinstance(persistence, str) or not persistence.strip():
+        persistence = "auto"
+    if persistence not in {"auto", "buffer-only", "save"}:
+        return tool_error("patch: persistence must be one of auto, buffer-only, save")
+    if persistence == "buffer-only":
+        return tool_error(
+            "patch: persistence='buffer-only' requires an enabled live Context Runtime "
+            "bound to Neovim; refusing disk fallback"
+        )
+    if args.get("mode", "replace") == "patch" and persistence not in {"auto", "save"}:
+        return tool_error("patch: V4A patch mode does not support persistence='buffer-only'")
     return patch_tool(
         mode=args.get("mode", "replace"), path=args.get("path"),
         old_string=args.get("old_string"), new_string=args.get("new_string"),
