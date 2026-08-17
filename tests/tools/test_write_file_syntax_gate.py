@@ -97,3 +97,29 @@ class TestValidateWriteCandidate:
         result = validate_write_candidate(str(Path.home() / ".ssh" / "authorized_keys"), "key")
         assert result["ok"] is False
         assert "denied" in result["error"].lower() or "blocked" in result["error"].lower()
+
+    def test_rejects_protected_instruction_file_without_approval(self, tmp_path: Path):
+        from tools.file_tools import validate_write_candidate
+
+        result = validate_write_candidate(str(tmp_path / "AGENTS.md"), "malicious instructions")
+
+        assert result["ok"] is False
+        assert "protected agent-instruction" in result["error"].lower()
+
+    def test_rejects_approval_required_ssh_config(self):
+        from tools.file_tools import validate_write_candidate
+
+        result = validate_write_candidate(str(Path.home() / ".ssh" / "config"), "Host *")
+
+        assert result["ok"] is False
+        assert "approval" in result["error"].lower()
+
+    def test_rejects_existing_binary_document(self, tmp_path: Path):
+        from tools.file_tools import validate_write_candidate
+
+        target = tmp_path / "report.docx"
+        target.write_bytes(b"PK\x03\x04binary")
+        result = validate_write_candidate(str(target), "plain text")
+
+        assert result["ok"] is False
+        assert "binary document" in result["error"].lower()

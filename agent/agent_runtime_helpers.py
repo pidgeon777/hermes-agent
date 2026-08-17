@@ -3052,10 +3052,14 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
 
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
     try:
-        from hermes_cli.middleware import apply_tool_request_middleware
+        from hermes_cli import middleware as _middleware
+    except Exception as _mw_err:
+        logger.debug("tool_request middleware import error: %s", _mw_err)
+        _middleware = None
 
-        if not skip_tool_request_middleware:
-            _tool_request_mw = apply_tool_request_middleware(
+    if not skip_tool_request_middleware and _middleware is not None:
+        try:
+            _tool_request_mw = _middleware.apply_tool_request_middleware(
                 function_name,
                 function_args,
                 task_id=effective_task_id or "",
@@ -3066,8 +3070,10 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             )
             function_args = _tool_request_mw.payload
             _tool_middleware_trace = _tool_request_mw.trace
-    except Exception as _mw_err:
-        logger.debug("tool_request middleware error: %s", _mw_err)
+        except _middleware.CriticalMiddlewareError:
+            raise
+        except Exception as _mw_err:
+            logger.debug("tool_request middleware error: %s", _mw_err)
 
     # Check plugin hooks for a block or approval directive before executing.
     block_message: Optional[str] = None

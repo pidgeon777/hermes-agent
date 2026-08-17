@@ -356,6 +356,65 @@ class TestPluginDiscovery:
         with pytest.raises(CriticalMiddlewareError, match="authoritative request mediation failed"):
             apply_llm_request_middleware({"messages": []})
 
+    def test_agent_runtime_invoke_tool_propagates_critical_request_middleware(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from agent.agent_runtime_helpers import invoke_tool
+
+        def fail(*args, **kwargs):
+            raise CriticalMiddlewareError("tool_request", fail, RuntimeError("authoritative tool mediation failed"))
+
+        monkeypatch.setattr("hermes_cli.middleware.apply_tool_request_middleware", fail)
+        agent = SimpleNamespace(
+            session_id="session-a",
+            _current_turn_id="turn-a",
+            _current_api_request_id="request-a",
+        )
+
+        with pytest.raises(CriticalMiddlewareError, match="authoritative tool mediation failed"):
+            invoke_tool(agent, "terminal", {"command": "printf blocked"}, "task-a")
+
+    def test_model_tools_dispatch_propagates_critical_request_middleware(self, monkeypatch):
+        from model_tools import handle_function_call
+
+        def fail(*args, **kwargs):
+            raise CriticalMiddlewareError("tool_request", fail, RuntimeError("authoritative bridge mediation failed"))
+
+        monkeypatch.setattr("hermes_cli.middleware.apply_tool_request_middleware", fail)
+
+        with pytest.raises(CriticalMiddlewareError, match="authoritative bridge mediation failed"):
+            handle_function_call("terminal", {"command": "printf blocked"}, task_id="task-b")
+
+    def test_tool_dispatchers_keep_noncritical_request_errors_fail_open(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import agent.agent_runtime_helpers as runtime_helpers
+        import model_tools
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("optional middleware unavailable")
+
+        monkeypatch.setattr("hermes_cli.middleware.apply_tool_request_middleware", fail)
+        fake_run_agent = SimpleNamespace(
+            handle_function_call=lambda *args, **kwargs: "runtime-ok",
+        )
+        monkeypatch.setattr(runtime_helpers, "_ra", lambda: fake_run_agent)
+        agent = SimpleNamespace(
+            session_id="session-c",
+            _current_turn_id="turn-c",
+            _current_api_request_id="request-c",
+            _memory_manager=None,
+            valid_tool_names=[],
+            enabled_toolsets=None,
+            disabled_toolsets=None,
+        )
+
+        assert runtime_helpers.invoke_tool(
+            agent, "terminal", {"command": "printf allowed"}, "task-c",
+            pre_tool_block_checked=True,
+            skip_tool_execution_middleware=True,
+        ) == "runtime-ok"
+
     def test_fail_closed_execution_middleware_blocks_before_downstream(self, monkeypatch):
         calls = []
 

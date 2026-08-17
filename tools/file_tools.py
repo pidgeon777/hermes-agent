@@ -1200,9 +1200,37 @@ def validate_write_candidate(filepath: str, content: str, task_id: str = "defaul
         resolved = str(_resolve_path_for_task(filepath, task_id))
     except (OSError, ValueError) as exc:
         return {"ok": False, "error": f"Invalid file path: {exc}"}
-    denied = get_write_denied_error(resolved)
-    if denied:
-        return {"ok": False, "error": denied}
+    protected_enabled, protected_extra = _protected_instruction_config()
+    protected_reason = _protected_instruction_reason(
+        filepath,
+        task_id,
+        enabled=protected_enabled,
+        extra_patterns=protected_extra,
+    )
+    try:
+        from agent.file_safety import is_write_approval_required
+        approval_required = is_write_approval_required(filepath)
+    except Exception:
+        approval_required = False
+
+    for error in (
+        get_write_denied_error(resolved),
+        _check_sensitive_path(filepath, task_id),
+        _check_binary_document_write(filepath, task_id),
+        (
+            "BLOCKED: write to protected agent-instruction file "
+            f"({protected_reason}) requires explicit human approval; "
+            "buffer validation cannot grant approval."
+            if protected_reason else None
+        ),
+        (
+            f"BLOCKED: write to SSH config file ({filepath}) requires approval; "
+            "buffer validation cannot grant approval."
+            if approval_required else None
+        ),
+    ):
+        if error:
+            return {"ok": False, "error": error}
     if not cross_profile:
         warning = _check_cross_profile_path(resolved, task_id)
         if warning:
