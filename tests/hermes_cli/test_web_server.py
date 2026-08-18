@@ -1010,6 +1010,7 @@ class TestWebServerEndpoints:
         )
         assert resp.status_code == 401
 
+
     # ── POST /api/chat/image-upload (browser clipboard/drop images) ─────
 
 

@@ -31,6 +31,7 @@ Usage:
 import base64
 import contextlib
 import asyncio
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -62,12 +63,53 @@ def _load_auxiliary_client() -> None:
             extract_content_or_reasoning = _ecr
 
 
-from hermes_constants import get_hermes_dir
+from hermes_constants import get_hermes_dir, get_hermes_home
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
 import sys
 
 logger = logging.getLogger(__name__)
+
+_VISION_MEDIA_MAX_BYTES = 25 * 1024 * 1024
+_VISION_MEDIA_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "image/x-icon": ".ico",
+}
+
+
+def _persist_vision_media(data: bytes, mime_type: str) -> Optional[str]:
+    """Persist analyzed image bytes inside the existing media allowlist."""
+    extension = _VISION_MEDIA_EXTENSIONS.get(str(mime_type or "").lower())
+    if extension is None or not data or len(data) > _VISION_MEDIA_MAX_BYTES:
+        return None
+    destination_dir = get_hermes_home() / "cache" / "vision-media"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(data).hexdigest()
+    destination = destination_dir / f"{digest}{extension}"
+    if not destination.exists():
+        temporary = destination_dir / f".{digest}-{uuid.uuid4().hex}.tmp"
+        try:
+            temporary.write_bytes(data)
+            os.replace(temporary, destination)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return str(destination)
+
+
+def _persist_vision_media_path(path: Path, mime_type: str) -> Optional[str]:
+    try:
+        if not path.is_file() or path.stat().st_size > _VISION_MEDIA_MAX_BYTES:
+            return None
+        return _persist_vision_media(path.read_bytes(), mime_type)
+    except OSError:
+        return None
 
 _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
 
@@ -1071,6 +1113,7 @@ def _build_native_vision_tool_result(
     question: str,
     image_data_url: str,
     image_size_bytes: int,
+    media_reference: Optional[str] = None,
     scale_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the multimodal tool-result envelope returned by the fast path.
@@ -1111,6 +1154,7 @@ def _build_native_vision_tool_result(
 
     return {
         "_multimodal": True,
+        "media_reference": media_reference,
         "content": [
             {"type": "text", "text": text_part},
             {"type": "image_url", "image_url": {"url": image_data_url}},
@@ -1118,6 +1162,7 @@ def _build_native_vision_tool_result(
         "text_summary": summary,
         "meta": {
             "image_url": image_url[:200],
+            "media_reference": media_reference,
             "size_bytes": image_size_bytes,
             "native_vision": True,
         },
@@ -1273,11 +1318,17 @@ async def _vision_analyze_native(
                     success=False,
                 )
 
+        media_reference = await asyncio.to_thread(
+            _persist_vision_media_path,
+            temp_image_path,
+            detected_mime_type,
+        )
         return _build_native_vision_tool_result(
             image_url=image_url,
             question=question,
             image_data_url=image_data_url,
             image_size_bytes=image_size_bytes,
+            media_reference=media_reference,
             scale_note=_build_scale_note(
                 _scale_info or None, _crop_offset or None,
             ),
@@ -1549,6 +1600,13 @@ async def vision_analyze_tool(
             "success": True,
             "analysis": f"[{scale_note}] {analysis}" if scale_note else analysis,
         }
+        media_reference = await asyncio.to_thread(
+            _persist_vision_media_path,
+            temp_image_path,
+            detected_mime_type,
+        )
+        if media_reference:
+            result["media_reference"] = media_reference
         if scale_note:
             result["scale_note"] = scale_note
         

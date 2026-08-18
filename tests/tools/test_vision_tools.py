@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tools.vision_tools import (
+    _persist_vision_media,
     _validate_image_url,
     _handle_vision_analyze,
     _determine_mime_type,
@@ -28,6 +29,30 @@ from tools.vision_tools import (
 
 
 _RESOLVES = [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+
+class TestPersistVisionMedia:
+    def test_persists_content_addressed_image_under_hermes_cache(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        (tmp_path / "home" / "vision_media").mkdir(parents=True)
+        (tmp_path / "home" / "vision_media" / "legacy.png").write_bytes(b"legacy")
+        data = b"\x89PNG\r\n\x1a\n" + b"preview"
+
+        first = _persist_vision_media(data, "image/png")
+        second = _persist_vision_media(data, "image/png")
+
+        assert first == second
+        assert first is not None
+        target = Path(first)
+        assert target.is_file()
+        assert target.read_bytes() == data
+        assert target.parent == tmp_path / "home" / "cache" / "vision-media"
+
+    def test_rejects_non_image_or_oversized_payload(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+        assert _persist_vision_media(b"text", "text/plain") is None
+        assert _persist_vision_media(b"x" * (25 * 1024 * 1024 + 1), "image/png") is None
 
 
 # ---------------------------------------------------------------------------
