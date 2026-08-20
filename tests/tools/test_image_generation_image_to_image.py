@@ -224,6 +224,51 @@ class TestPluginDispatchImageToImage:
         assert provider.received["reference_image_urls"] == ["https://in/ref.png"]
 
 
+    def test_per_call_provider_override_selects_plugin_without_changing_default_model(self, cfg_home, monkeypatch):
+        import tools.image_generation_tool as image_tool
+        from hermes_cli import plugins as plugins_module
+        from agent import image_gen_registry as reg
+
+        provider = _EditCapableProvider()
+        reg.register_provider(provider)
+        monkeypatch.setattr(image_tool, "_read_configured_image_provider", lambda: "fal")
+        monkeypatch.setattr(image_tool, "_read_configured_image_model", lambda: "fal-ai/flux-2/klein/9b")
+        monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda *a, **k: None)
+        monkeypatch.setattr(reg, "get_provider", lambda n: provider if n == "editcap" else None)
+
+        raw = image_tool._dispatch_to_plugin_provider(
+            "make night", "square",
+            image_url="https://in/src.png",
+            provider_override="editcap",
+        )
+        out = json.loads(raw)
+        assert out["success"] is True
+        assert provider.received["image_url"] == "https://in/src.png"
+        assert "model" not in provider.received
+
+    def test_handler_forwards_per_call_provider_override(self, monkeypatch):
+        import tools.image_generation_tool as image_tool
+
+        seen = {}
+
+        def fake_dispatch(prompt, aspect_ratio, **kwargs):
+            seen.update({"prompt": prompt, "aspect_ratio": aspect_ratio, **kwargs})
+            return json.dumps({"success": True, "image": "C:/cache/out.png"})
+
+        monkeypatch.setattr(image_tool, "_dispatch_to_plugin_provider", fake_dispatch)
+        monkeypatch.setattr(
+            image_tool, "_confine_source_images",
+            lambda image_url, refs, task_id: (image_url, refs, None),
+        )
+
+        raw = image_tool._handle_image_generate({
+            "prompt": "a pigeon",
+            "provider": "chatgpt-web",
+        })
+        out = json.loads(raw)
+        assert out["success"] is True
+        assert seen["provider_override"] == "chatgpt-web"
+
     def test_legacy_provider_edit_request_surfaces_clear_error(self, cfg_home, monkeypatch):
         import tools.image_generation_tool as image_tool
         from hermes_cli import plugins as plugins_module

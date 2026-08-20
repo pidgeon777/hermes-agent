@@ -1474,6 +1474,16 @@ IMAGE_GENERATE_SCHEMA = {
                     "the per-model default."
                 ),
             },
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Optional backend override for this call only. Omit or pass "
+                    "'default' to use the configured image provider. Pass a "
+                    "registered provider name such as 'chatgpt-web' when the "
+                    "user explicitly requests that backend. This does not "
+                    "change the persistent image-generation configuration."
+                ),
+            },
         },
         "required": ["prompt"],
     },
@@ -1525,6 +1535,7 @@ def _dispatch_to_plugin_provider(
     image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None,
     upscale: Optional[bool] = None,
+    provider_override: Optional[str] = None,
 ):
     """Route the call to a plugin-registered provider when one is selected.
 
@@ -1543,12 +1554,21 @@ def _dispatch_to_plugin_provider(
     post-generation high-resolution pass; providers without upscale support
     ignore it via their ``**kwargs`` (the ABC contract).
     """
-    configured = _read_configured_image_provider()
+    override = provider_override.strip() if isinstance(provider_override, str) else ""
+    configured = (
+        _read_configured_image_provider()
+        if not override or override == "default"
+        else override
+    )
     if not configured or configured == "fal":
         return None  # unset/explicit FAL keeps the legacy FAL path
 
     # Also read configured model so we can pass it to the plugin
-    configured_model = _read_configured_image_model()
+    configured_model = (
+        _read_configured_image_model()
+        if not override or override == "default"
+        else None
+    )
 
     try:
         # Import locally so plugin discovery isn't triggered just by
@@ -1816,6 +1836,7 @@ def _handle_image_generate(args, **kw):
     image_url = args.get("image_url")
     reference_image_urls = args.get("reference_image_urls")
     upscale = args.get("upscale")
+    provider_override = args.get("provider")
     if not isinstance(upscale, bool):
         upscale = None
     task_id = kw.get("task_id")
@@ -1837,6 +1858,7 @@ def _handle_image_generate(args, **kw):
         image_url=image_url,
         reference_image_urls=reference_image_urls,
         upscale=upscale,
+        provider_override=provider_override,
     )
     if dispatched is not None:
         return _postprocess_image_generate_result(dispatched, task_id=task_id)
