@@ -8654,11 +8654,22 @@ class AIAgent:
 
                     while not durable_turn_lease_stop.wait(_lease_refresh_interval):
                         try:
-                            if not _turn_db.refresh_session_turn_lease(
-                                getattr(self, "session_id", None) or session_id,
-                                durable_turn_lease,
-                                ttl_seconds=_lease_ttl,
-                            ):
+                            try:
+                                _lease_refreshed = _turn_db.refresh_session_turn_lease(
+                                    getattr(self, "session_id", None) or session_id,
+                                    durable_turn_lease,
+                                    ttl_seconds=_lease_ttl,
+                                    patience_s=10.0,
+                                )
+                            except TypeError as exc:
+                                if "unexpected keyword argument 'patience_s'" not in str(exc):
+                                    raise
+                                _lease_refreshed = _turn_db.refresh_session_turn_lease(
+                                    getattr(self, "session_id", None) or session_id,
+                                    durable_turn_lease,
+                                    ttl_seconds=_lease_ttl,
+                                )
+                            if not _lease_refreshed:
                                 # finally sets the stop event then releases.
                                 # A late holder-fenced miss after that join
                                 # timeout must not hard-interrupt the next turn.
@@ -8818,9 +8829,18 @@ class AIAgent:
                     _clear_durable_turn_lease_interrupt()
                     if durable_turn_lease is not None:
                         try:
-                            _turn_db.release_session_turn_lease(
-                                session_id, durable_turn_lease
-                            )
+                            try:
+                                _turn_db.release_session_turn_lease(
+                                    session_id,
+                                    durable_turn_lease,
+                                    patience_s=10.0,
+                                )
+                            except TypeError as exc:
+                                if "unexpected keyword argument 'patience_s'" not in str(exc):
+                                    raise
+                                _turn_db.release_session_turn_lease(
+                                    session_id, durable_turn_lease
+                                )
                         except Exception:
                             logger.error(
                                 "Failed to release session turn lease: %s",

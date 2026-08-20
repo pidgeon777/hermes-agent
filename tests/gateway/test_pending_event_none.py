@@ -11,7 +11,7 @@ do not get recycled into the pending-user-message follow-up path.
 
 from types import SimpleNamespace
 
-from gateway.run import _is_control_interrupt_message
+from gateway.run import _is_control_interrupt_message, _strip_auto_continue_noise
 
 
 def _extract_channel_prompt(pending_event):
@@ -52,5 +52,23 @@ class TestControlInterruptMessages:
     def test_stop_requested_is_not_treated_as_pending_user_message(self):
         result = _extract_pending_text(True, None, "Stop requested")
         assert result is None
+
+    def test_session_lease_interrupts_are_not_recycled_as_user_messages(self):
+        for message in (
+            "Session turn lease lost; stopping to protect the transcript.",
+            "Session turn lease could not be refreshed; stopping to protect the transcript.",
+        ):
+            assert _extract_pending_text(True, None, message) is None
+
+    def test_persisted_lease_noise_is_removed_without_dropping_real_user_text(self):
+        question = "Cerca online il meteo di oggi a Brescia."
+        noisy = (
+            f"{question}\n\n"
+            "Session turn lease could not be refreshed; stopping to protect the transcript."
+        )
+        assert _strip_auto_continue_noise(noisy) == question
+        assert _strip_auto_continue_noise(
+            "Session turn lease lost; stopping to protect the transcript."
+        ) == ""
 
 

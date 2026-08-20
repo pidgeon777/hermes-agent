@@ -6623,6 +6623,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         holder: str,
         *,
         ttl_seconds: float = 300.0,
+        patience_s: Optional[float] = None,
     ) -> bool:
         """Extend a turn lease only while ``holder`` still owns it."""
         if not session_id or not holder:
@@ -6638,9 +6639,15 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             )
             return cursor.rowcount > 0
 
-        return bool(self._execute_write(_do))
+        return bool(self._execute_write(_do, patience_s=patience_s))
 
-    def release_session_turn_lease(self, session_id: str, holder: str) -> None:
+    def release_session_turn_lease(
+        self,
+        session_id: str,
+        holder: str,
+        *,
+        patience_s: Optional[float] = None,
+    ) -> None:
         """Release a turn lease iff ``holder`` still owns it; idempotent."""
         if not session_id or not holder:
             return
@@ -6653,7 +6660,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 (conversation_id, holder),
             )
 
-        self._execute_write(_do)
+        self._execute_write(_do, patience_s=patience_s)
 
     def get_compression_lock_holder(self, session_id: str) -> Optional[str]:
         """Return the current (non-expired) holder for ``session_id``, or None.

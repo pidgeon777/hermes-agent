@@ -1635,6 +1635,12 @@ from agent.replay_cleanup import (  # noqa: E402
 
 _AUTO_CONTINUE_NOTE_PREFIX = "[System note: Your previous turn"
 _AUTO_CONTINUE_FALLBACK_PREFIX = "[System note: A new message"
+_INTERNAL_TURN_LEASE_LINES = frozenset(
+    {
+        "session turn lease lost; stopping to protect the transcript.",
+        "session turn lease could not be refreshed; stopping to protect the transcript.",
+    }
+)
 
 
 def _is_auto_continue_noise(content: Any) -> bool:
@@ -1649,22 +1655,19 @@ def _is_auto_continue_noise(content: Any) -> bool:
 
 
 def _strip_auto_continue_noise(content: Any) -> Any:
-    """Remove persisted gateway auto-continue note prefix from user text.
-
-    Older gateway builds prepended the recovery note directly to the user
-    message, so the transcript row can contain both the synthetic note and
-    the user's real question.  Strip one or more leading synthetic notes while
-    preserving any real text that follows.
-    """
-    if not _is_auto_continue_noise(content):
+    """Remove persisted internal recovery text while preserving real user text."""
+    if not isinstance(content, str):
         return content
-    text = str(content)
+    text = content
     while _is_auto_continue_noise(text):
         end = text.find("]")
         if end < 0:
             return ""
         text = text[end + 1 :].lstrip()
-    return text
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+    return "\n\n".join(
+        block for block in blocks if block.lower() not in _INTERNAL_TURN_LEASE_LINES
+    )
 
 # Tools in this set return their deliverable artifact as a JSON payload with a
 # local-file path field rather than a literal ``MEDIA:`` tag (e.g. image_generate
@@ -3221,6 +3224,8 @@ _CONTROL_INTERRUPT_MESSAGES = frozenset(
         _INTERRUPT_REASON_SSE_DISCONNECT.lower(),
         _INTERRUPT_REASON_GATEWAY_SHUTDOWN.lower(),
         _INTERRUPT_REASON_GATEWAY_RESTART.lower(),
+        "session turn lease lost; stopping to protect the transcript.",
+        "session turn lease could not be refreshed; stopping to protect the transcript.",
     }
 )
 

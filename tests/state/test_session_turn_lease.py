@@ -252,6 +252,25 @@ def test_turn_lease_retries_locked_in_txn_key_walk(
     db.release_session_turn_lease("delegate-continuation", holder)
 
 
+def test_turn_lease_refresh_and_release_forward_explicit_patience(tmp_path, monkeypatch):
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("shared", source="test")
+    holder = f"pid={os.getpid()}:turn=current"
+    assert db.try_acquire_session_turn_lease("shared", holder, ttl_seconds=5)
+
+    observed = []
+    original = db._execute_write
+
+    def recording_execute_write(fn, patience_s=None):
+        observed.append(patience_s)
+        return original(fn, patience_s=patience_s)
+
+    monkeypatch.setattr(db, "_execute_write", recording_execute_write)
+    assert db.refresh_session_turn_lease("shared", holder, ttl_seconds=5, patience_s=10.0)
+    db.release_session_turn_lease("shared", holder, patience_s=10.0)
+    assert observed == [10.0, 10.0]
+
+
 def test_turn_lease_refresh_and_release_are_owner_fenced(tmp_path):
     db = SessionDB(tmp_path / "state.db")
     db.create_session("shared", source="test")
