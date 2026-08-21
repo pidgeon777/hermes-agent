@@ -8,6 +8,9 @@ def test_malformed_chatgpt_web_tool_protocol_errors_are_not_retryable():
     assert _is_deterministic_gateway_protocol_error(
         Exception("required_tool_call_missing:not_tool_call:No hermes-tool envelope found")
     )
+    assert _is_deterministic_gateway_protocol_error(
+        Exception("model_readback_mismatch:GPT-5.6 Sol:5.6 Terra")
+    )
 
 
 def test_transport_and_browser_errors_remain_retryable():

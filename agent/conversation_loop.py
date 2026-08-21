@@ -216,6 +216,7 @@ _API_CALL_MODULES = frozenset({
 _DETERMINISTIC_GATEWAY_PROTOCOL_ERROR_PREFIXES = (
     "completion_verification_invalid:",
     "required_tool_call_missing:",
+    "model_readback_mismatch:",
 )
 
 
