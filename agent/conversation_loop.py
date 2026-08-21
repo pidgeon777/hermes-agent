@@ -213,6 +213,24 @@ _API_CALL_MODULES = frozenset({
 })
 
 
+_DETERMINISTIC_GATEWAY_PROTOCOL_ERROR_PREFIXES = (
+    "completion_verification_invalid:",
+    "required_tool_call_missing:",
+)
+
+
+def _is_deterministic_gateway_protocol_error(error: BaseException) -> bool:
+    """Return True when retrying the whole provider request cannot help.
+
+    These prefixes are emitted only after the ChatGPT Web gateway has already
+    exhausted its same-conversation tool-envelope correction loop. Retrying at
+    the Hermes API layer would start a fresh remote conversation and replay the
+    identical deterministic validation failure.
+    """
+    message = str(error).strip().lower()
+    return any(message.startswith(prefix) for prefix in _DETERMINISTIC_GATEWAY_PROTOCOL_ERROR_PREFIXES)
+
+
 def _moa_client_consumes_prepared_request(client: Any) -> bool:
     """True when ``client`` is the in-process MoA facade.
 
@@ -5780,6 +5798,7 @@ def run_conversation(
                 # already behave once their recovery paths have failed.
                 is_client_error = (
                     is_local_validation_error
+                    or _is_deterministic_gateway_protocol_error(api_error)
                     or (
                         not classified.retryable
                         and not classified.should_compress
